@@ -25,7 +25,7 @@ function Ensure-Administrator {
     else {
         # Cache-bust the raw URL so an elevated relaunch does not pick up a stale script.
         $cacheBust = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
-        $remote = "irm '$RawScriptUrl?cb=$cacheBust' | iex"
+        $remote = "irm '${RawScriptUrl}?cb=$cacheBust' | iex"
         $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($remote))
         $args = "-NoProfile -ExecutionPolicy Bypass -EncodedCommand $encoded"
     }
