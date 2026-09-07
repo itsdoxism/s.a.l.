@@ -4,9 +4,6 @@
 $ErrorActionPreference = 'Stop'
 
 $RawScriptUrl = 'https://raw.githubusercontent.com/itsdoxism/s.a.l./main/SchoolAccountLockdown.ps1'
-$UserListRegistryPath = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList'
-$WindowsSystemPolicyPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System'
-$LogonPolicyPath = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
 $SalStatePath = 'HKLM:\SOFTWARE\S.A.L.'
 
 function Test-IsAdministrator {
@@ -73,102 +70,6 @@ function Test-LocalAdministrator {
     return $false
 }
 
-function Test-ComputerPartOfDomain {
-    try { return [bool](Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).PartOfDomain }
-    catch { return $false }
-}
-
-function Get-RegistryDword {
-    param(
-        [Parameter(Mandatory=$true)][string]$Path,
-        [Parameter(Mandatory=$true)][string]$Name
-    )
-
-    try {
-        if (-not (Test-Path $Path)) { return $null }
-        $item = Get-ItemProperty -Path $Path -ErrorAction Stop
-        $prop = $item.PSObject.Properties[$Name]
-        if ($null -eq $prop) { return $null }
-        return [int]$prop.Value
-    }
-    catch { return $null }
-}
-
-function Set-RegistryDword {
-    param(
-        [Parameter(Mandatory=$true)][string]$Path,
-        [Parameter(Mandatory=$true)][string]$Name,
-        [Parameter(Mandatory=$true)][int]$Value
-    )
-
-    if (-not (Test-Path $Path)) {
-        New-Item -Path $Path -Force -ErrorAction Stop | Out-Null
-    }
-    New-ItemProperty -Path $Path -Name $Name -PropertyType DWord -Value $Value -Force -ErrorAction Stop | Out-Null
-}
-
-function Get-StandardSignInState {
-    param([Parameter(Mandatory=$true)][string]$Name)
-
-    $account = Get-LocalUserSafe -Name $Name
-    $domainJoined = Test-ComputerPartOfDomain
-    $userListValue = Get-RegistryDword -Path $UserListRegistryPath -Name $Name
-    $hideFastSwitch = Get-RegistryDword -Path $LogonPolicyPath -Name 'HideFastUserSwitching'
-    $hideLastUser = Get-RegistryDword -Path $LogonPolicyPath -Name 'DontDisplayLastUserName'
-    $enumerateLocal = Get-RegistryDword -Path $WindowsSystemPolicyPath -Name 'EnumerateLocalUsers'
-
-    $exists = [bool]$account
-    $enabled = if ($account) { [bool]$account.Enabled } else { $false }
-    $notHiddenByName = ($null -eq $userListValue -or $userListValue -ne 0)
-    $fastSwitchAllowed = ($null -eq $hideFastSwitch -or $hideFastSwitch -eq 0)
-    $userTilesAllowed = ($null -eq $hideLastUser -or $hideLastUser -eq 0)
-    $localUsersListed = if ($domainJoined) { $enumerateLocal -eq 1 } else { $true }
-
-    [pscustomobject]@{
-        Exists               = $exists
-        Enabled              = $enabled
-        NotHiddenByName      = $notHiddenByName
-        FastSwitchAllowed    = $fastSwitchAllowed
-        UserTilesAllowed     = $userTilesAllowed
-        LocalUsersListed     = $localUsersListed
-        DomainJoined         = $domainJoined
-        Ready                = ($exists -and $enabled -and $notHiddenByName -and $fastSwitchAllowed -and $userTilesAllowed -and $localUsersListed)
-    }
-}
-
-function Test-StandardVisibleAtLogon {
-    param([Parameter(Mandatory=$true)][string]$Name)
-    return [bool](Get-StandardSignInState -Name $Name).Ready
-}
-
-function Ensure-StandardLoginVisibility {
-    param([Parameter(Mandatory=$true)][string]$Name)
-
-    $account = Get-LocalUserSafe -Name $Name
-    if (-not $account) { throw "Standard account '$Name' was not found." }
-
-    if (-not $account.Enabled) {
-        Enable-LocalUser -Name $Name -ErrorAction Stop
-        Write-Host "[OK] '$Name' is turned on." -ForegroundColor Green
-    }
-
-    Set-RegistryDword -Path $UserListRegistryPath -Name $Name -Value 1
-    Set-RegistryDword -Path $LogonPolicyPath -Name 'HideFastUserSwitching' -Value 0
-    Set-RegistryDword -Path $LogonPolicyPath -Name 'DontDisplayLastUserName' -Value 0
-
-    if (Test-ComputerPartOfDomain) {
-        Set-RegistryDword -Path $WindowsSystemPolicyPath -Name 'EnumerateLocalUsers' -Value 1
-    }
-
-    $after = Get-StandardSignInState -Name $Name
-    if (-not $after.Ready) {
-        throw 'Windows still has a sign-in policy blocking this account. A domain or device-management policy may be changing the setting back.'
-    }
-
-    Write-Host "[OK] '$Name' is allowed to show on the sign-in / Switch user screen." -ForegroundColor Green
-    Write-Host 'A full sign-out or restart is needed for Windows to refresh the user list.' -ForegroundColor Cyan
-}
-
 function Read-ConfirmedPassword {
     param([Parameter(Mandatory=$true)][string]$Label)
 
@@ -194,6 +95,52 @@ function Read-ConfirmedPassword {
     return $password1
 }
 
+function Get-StandardCandidates {
+    $protectedNames = @('Administrator','Guest','DefaultAccount','WDAGUtilityAccount','defaultuser0')
+
+    return @(
+        Get-LocalUser |
+            Where-Object {
+                $name = $_.Name
+                $sid = [string]$_.SID
+
+                ($protectedNames -notcontains $name) -and
+                ($sid -notmatch '-(500|501|503|504)$') -and
+                (-not (Test-LocalAdministrator -Name $name))
+            } |
+            Sort-Object Name
+    )
+}
+
+function Select-StandardAccount {
+    $accounts = @(Get-StandardCandidates)
+
+    if ($accounts.Count -eq 0) {
+        Write-Host ''
+        Write-Host 'No standard account was found.' -ForegroundColor Yellow
+        Write-Host 'Create the standard account in Windows Settings first, then run S.A.L. again.' -ForegroundColor Cyan
+        Write-Host 'S.A.L. no longer creates standard accounts itself.' -ForegroundColor DarkGray
+        return $null
+    }
+
+    Write-Host ''
+    Write-Host 'Standard accounts found:' -ForegroundColor Yellow
+    for ($i = 0; $i -lt $accounts.Count; $i++) {
+        $account = $accounts[$i]
+        $status = if ($account.Enabled) { 'active' } else { 'off' }
+        Write-Host "[$($i + 1)] $($account.Name)  ($status)"
+    }
+
+    while ($true) {
+        $choice = Read-Host 'Choose the standard account number'
+        $number = 0
+        if ([int]::TryParse($choice, [ref]$number) -and $number -ge 1 -and $number -le $accounts.Count) {
+            return $accounts[$number - 1].Name
+        }
+        Write-Host 'Please choose one of the numbers shown above.' -ForegroundColor Red
+    }
+}
+
 function Save-ManagedAccounts {
     param(
         [Parameter(Mandatory=$true)][string]$Standard,
@@ -204,7 +151,7 @@ function Save-ManagedAccounts {
         if (-not (Test-Path $SalStatePath)) { New-Item -Path $SalStatePath -Force | Out-Null }
         New-ItemProperty -Path $SalStatePath -Name 'StandardUser' -PropertyType String -Value $Standard -Force | Out-Null
         New-ItemProperty -Path $SalStatePath -Name 'AdminUser' -PropertyType String -Value $Admin -Force | Out-Null
-        # Keep the old key for compatibility with earlier S.A.L. builds.
+        # Keep the old key so PCs configured by older S.A.L. builds still work.
         New-ItemProperty -Path $SalStatePath -Name 'StudentUser' -PropertyType String -Value $Standard -Force | Out-Null
     }
     catch {
@@ -216,30 +163,19 @@ function Get-ManagedAccounts {
     try {
         if (Test-Path $SalStatePath) {
             $saved = Get-ItemProperty -Path $SalStatePath -ErrorAction Stop
-            $standardName = [string]$saved.StandardUser
-            if ([string]::IsNullOrWhiteSpace($standardName)) { $standardName = [string]$saved.StudentUser }
+            $standard = [string]$saved.StandardUser
+            if ([string]::IsNullOrWhiteSpace($standard)) { $standard = [string]$saved.StudentUser }
+            $admin = [string]$saved.AdminUser
 
-            if (-not [string]::IsNullOrWhiteSpace($standardName) -and -not [string]::IsNullOrWhiteSpace([string]$saved.AdminUser)) {
+            if (-not [string]::IsNullOrWhiteSpace($standard) -and -not [string]::IsNullOrWhiteSpace($admin)) {
                 return [pscustomobject]@{
-                    Standard = $standardName
-                    Admin    = [string]$saved.AdminUser
-                    Source   = 'Saved setup'
+                    Standard = $standard
+                    Admin    = $admin
                 }
             }
         }
     }
     catch {}
-
-    $standards = @(Get-LocalUser | Where-Object { $_.Description -in @('School standard account','School student account') })
-    $admins = @(Get-LocalUser | Where-Object { $_.Description -eq 'Dedicated school PC administrator' })
-
-    if ($standards.Count -eq 1 -and $admins.Count -eq 1) {
-        return [pscustomobject]@{
-            Standard = $standards[0].Name
-            Admin    = $admins[0].Name
-            Source   = 'Found automatically'
-        }
-    }
 
     return $null
 }
@@ -252,16 +188,14 @@ function Get-DeviceState {
 
     $standardAccount = Get-LocalUserSafe -Name $Standard
     $adminAccount = Get-LocalUserSafe -Name $Admin
-    $signIn = Get-StandardSignInState -Name $Standard
 
     [pscustomobject]@{
-        AdminExists            = [bool]$adminAccount
-        AdminIsAdministrator   = if ($adminAccount) { Test-LocalAdministrator -Name $Admin } else { $false }
-        StandardExists         = [bool]$standardAccount
-        StandardIsEnabled      = if ($standardAccount) { [bool]$standardAccount.Enabled } else { $false }
-        StandardVisibleAtLogon = [bool]$signIn.Ready
-        StandardIsStandard     = if ($standardAccount) { -not (Test-LocalAdministrator -Name $Standard) } else { $false }
-        PasswordChangeBlocked  = if ($standardAccount) { $standardAccount.UserMayChangePassword -eq $false } else { $false }
+        AdminExists           = [bool]$adminAccount
+        AdminIsAdministrator  = if ($adminAccount) { Test-LocalAdministrator -Name $Admin } else { $false }
+        StandardExists        = [bool]$standardAccount
+        StandardIsEnabled     = if ($standardAccount) { [bool]$standardAccount.Enabled } else { $false }
+        StandardIsStandard    = if ($standardAccount) { -not (Test-LocalAdministrator -Name $Standard) } else { $false }
+        PasswordChangeBlocked = if ($standardAccount) { $standardAccount.UserMayChangePassword -eq $false } else { $false }
     }
 }
 
@@ -272,7 +206,6 @@ function Test-FullyConfigured {
         $State.AdminIsAdministrator -and
         $State.StandardExists -and
         $State.StandardIsEnabled -and
-        $State.StandardVisibleAtLogon -and
         $State.StandardIsStandard -and
         $State.PasswordChangeBlocked
     )
@@ -290,7 +223,6 @@ function Show-State {
     Write-Host "$(Mark $State.AdminIsAdministrator) Admin access is on"
     Write-Host "$(Mark $State.StandardExists) Standard account found"
     Write-Host "$(Mark $State.StandardIsEnabled) Standard account is active"
-    Write-Host "$(Mark $State.StandardVisibleAtLogon) Standard account can appear in the Windows user list"
     Write-Host "$(Mark $State.StandardIsStandard) Account is a standard user"
     Write-Host "$(Mark $State.PasswordChangeBlocked) Standard account cannot set or change a password"
 }
@@ -308,18 +240,11 @@ function Get-DeviceIssues {
     elseif (-not $state.AdminIsAdministrator) { $issues += "'$Admin' is not an admin." }
 
     if (-not $state.StandardExists) {
-        $issues += "Standard account '$Standard' is missing."
+        $issues += "Standard account '$Standard' is missing. Create it in Windows Settings, then use Set up accounts again."
         return @($issues)
     }
 
     if (-not $state.StandardIsEnabled) { $issues += "Standard account '$Standard' is turned off." }
-
-    $signIn = Get-StandardSignInState -Name $Standard
-    if (-not $signIn.NotHiddenByName) { $issues += "Windows has '$Standard' hidden by name." }
-    if (-not $signIn.FastSwitchAllowed) { $issues += 'Windows has account switching hidden.' }
-    if (-not $signIn.UserTilesAllowed) { $issues += 'Windows is set not to show user tiles normally.' }
-    if (-not $signIn.LocalUsersListed) { $issues += 'Windows is not listing local users on this domain-joined PC.' }
-
     if (-not $state.StandardIsStandard) { $issues += "Standard account '$Standard' has admin access." }
     if (-not $state.PasswordChangeBlocked) { $issues += "Standard account '$Standard' can set or change a password." }
 
@@ -335,26 +260,12 @@ function Show-LocalUsers {
         [pscustomobject]@{
             Name              = $user.Name
             Active            = $user.Enabled
-            Admin             = Test-LocalAdministrator -Name $user.Name
+            Type              = if (Test-LocalAdministrator -Name $user.Name) { 'Admin' } else { 'Standard' }
             CanChangePassword = $user.UserMayChangePassword
         }
     }
 
     $rows | Format-Table -AutoSize
-}
-
-function Show-SignInDetails {
-    param([Parameter(Mandatory=$true)][string]$Standard)
-
-    $s = Get-StandardSignInState -Name $Standard
-    Write-Host ''
-    Write-Host 'Windows user-list checks:' -ForegroundColor Yellow
-    Write-Host "Account active             : $($s.Enabled)"
-    Write-Host "Hidden by account name     : $(-not $s.NotHiddenByName)"
-    Write-Host "Account switching allowed  : $($s.FastSwitchAllowed)"
-    Write-Host "User tiles allowed         : $($s.UserTilesAllowed)"
-    if ($s.DomainJoined) { Write-Host "Local users listed         : $($s.LocalUsersListed)" }
-    Write-Host "Ready                      : $($s.Ready)"
 }
 
 function Show-Diagnostics {
@@ -367,18 +278,16 @@ function Show-Diagnostics {
     Write-Host ''
 
     if (-not $managed) {
-        Write-Host 'S.A.L. does not know the standard/admin pair yet. Use [2] Set up accounts first.' -ForegroundColor Yellow
+        Write-Host 'No saved setup yet. Use [2] Set up accounts.' -ForegroundColor Yellow
         return
     }
 
     Write-Host "Standard: $($managed.Standard)" -ForegroundColor Cyan
     Write-Host "Admin   : $($managed.Admin)" -ForegroundColor Cyan
-    Write-Host "Source  : $($managed.Source)" -ForegroundColor DarkGray
     Write-Host ''
 
     $state = Get-DeviceState -Standard $managed.Standard -Admin $managed.Admin
     Show-State -State $state
-    Show-SignInDetails -Standard $managed.Standard
 
     $issues = @(Get-DeviceIssues -Standard $managed.Standard -Admin $managed.Admin)
     if ($issues.Count -eq 0) {
@@ -402,8 +311,10 @@ function Invoke-PreexistingUserCleanup {
             Where-Object {
                 $name = $_.Name
                 $sid = [string]$_.SID
+
                 ($name -ine $Standard) -and
                 ($name -ine $Admin) -and
+                ($name -ine [Environment]::UserName) -and
                 ($protectedNames -notcontains $name) -and
                 ($sid -notmatch '-(500|501|503|504)$')
             } |
@@ -417,14 +328,10 @@ function Invoke-PreexistingUserCleanup {
 
     Write-Host ''
     Write-Host 'Extra accounts found:' -ForegroundColor Yellow
-    foreach ($candidate in $candidates) {
-        $suffix = ''
-        if ($candidate.Name -ieq [Environment]::UserName) { $suffix = '  [YOU ARE USING THIS NOW]' }
-        Write-Host "  - $($candidate.Name)$suffix"
-    }
+    foreach ($candidate in $candidates) { Write-Host "  - $($candidate.Name)" }
 
     Write-Host ''
-    Write-Host 'The standard account, admin, Windows system accounts, and accounts created during this run are protected.' -ForegroundColor DarkGray
+    Write-Host 'The standard account, admin, current account, and Windows system accounts are protected.' -ForegroundColor DarkGray
     Write-Host 'This removes the account only. Files in C:\Users are not deleted.' -ForegroundColor DarkGray
 
     $choice = Read-Host 'Remove all accounts listed above? (Y/N)'
@@ -460,8 +367,8 @@ function Invoke-SmartRepair {
 
     $state = Get-DeviceState -Standard $Standard -Admin $Admin
     Show-State -State $state
-    $issues = @(Get-DeviceIssues -Standard $Standard -Admin $Admin)
 
+    $issues = @(Get-DeviceIssues -Standard $Standard -Admin $Admin)
     if ($issues.Count -eq 0) {
         Write-Host "`n[OK] Everything looks good. Nothing to fix." -ForegroundColor Green
         return
@@ -469,6 +376,13 @@ function Invoke-SmartRepair {
 
     Write-Host "`nFound $($issues.Count) thing(s) to fix:" -ForegroundColor Yellow
     foreach ($issue in $issues) { Write-Host "  - $issue" -ForegroundColor Yellow }
+
+    if (-not $state.StandardExists) {
+        Write-Host ''
+        Write-Host 'S.A.L. will not recreate the standard account.' -ForegroundColor Yellow
+        Write-Host 'Create one in Windows Settings, then use [2] Set up accounts to select it.' -ForegroundColor Cyan
+        return
+    }
 
     Write-Host ''
     $confirm = Read-Host 'Fix everything listed above? (Y/N)'
@@ -492,13 +406,14 @@ function Invoke-SmartRepair {
         }
 
         if (-not (Get-LocalUserSafe -Name $Standard)) {
-            $create = Read-Host "Standard account '$Standard' is missing. Create it with no password? (Y/N)"
-            if ($create -notmatch '^(y|yes)$') { throw 'Fix cancelled because the standard account is missing.' }
-            New-LocalUser -Name $Standard -NoPassword -Description 'School standard account' -ErrorAction Stop | Out-Null
-            Write-Host "[OK] Standard account '$Standard' created." -ForegroundColor Green
+            throw 'The saved standard account no longer exists.'
         }
 
-        Ensure-StandardLoginVisibility -Name $Standard
+        $standardAccount = Get-LocalUserSafe -Name $Standard
+        if (-not $standardAccount.Enabled) {
+            Enable-LocalUser -Name $Standard -ErrorAction Stop
+            Write-Host "[OK] '$Standard' turned on." -ForegroundColor Green
+        }
 
         if (Test-LocalAdministrator -Name $Standard) {
             Remove-LocalGroupMember -Group $AdminGroup -Member $Standard -ErrorAction Stop
@@ -515,7 +430,6 @@ function Invoke-SmartRepair {
         if (Test-FullyConfigured -State $finalState) {
             Save-ManagedAccounts -Standard $Standard -Admin $Admin
             Write-Host "`n[OK] Fixed." -ForegroundColor Green
-            Write-Host 'Now fully sign out or restart Windows before checking the user list.' -ForegroundColor Cyan
         }
         else {
             Write-Host "`n[WARN] Some things still need attention." -ForegroundColor Yellow
@@ -523,41 +437,6 @@ function Invoke-SmartRepair {
     }
     catch {
         Write-Host "`nERROR: $($_.Exception.Message)" -ForegroundColor Red
-    }
-}
-
-function Invoke-StandardSignInRepair {
-    $managed = Get-ManagedAccounts
-    $defaultStandard = if ($managed) { $managed.Standard } else { '' }
-
-    if ($defaultStandard) {
-        $Standard = Read-Host "Standard account [$defaultStandard]"
-        if ([string]::IsNullOrWhiteSpace($Standard)) { $Standard = $defaultStandard }
-    }
-    else {
-        $Standard = Read-Host 'Standard account name'
-    }
-
-    if ([string]::IsNullOrWhiteSpace($Standard)) { return }
-    if (-not (Get-LocalUserSafe -Name $Standard)) {
-        Write-Host "Standard account '$Standard' was not found." -ForegroundColor Red
-        return
-    }
-
-    Show-SignInDetails -Standard $Standard
-    Write-Host ''
-    $confirm = Read-Host 'Apply the Windows user-list fixes? (Y/N)'
-    if ($confirm -notmatch '^(y|yes)$') { return }
-
-    try {
-        Ensure-StandardLoginVisibility -Name $Standard
-        Show-SignInDetails -Standard $Standard
-        Write-Host ''
-        Write-Host '[OK] Sign-in settings were repaired.' -ForegroundColor Green
-        Write-Host 'IMPORTANT: fully sign out or restart Windows now. Locking with Win+L may still show the old cached user list.' -ForegroundColor Cyan
-    }
-    catch {
-        Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red
     }
 }
 
@@ -615,18 +494,11 @@ function Invoke-AdminMaintenance {
 function Invoke-FullSetup {
     Show-LocalUsers
 
-    $Standard = Read-Host 'Standard account name'
-    if ([string]::IsNullOrWhiteSpace($Standard)) {
-        Write-Host 'Standard account name cannot be empty.' -ForegroundColor Red
-        return
-    }
+    $Standard = Select-StandardAccount
+    if ([string]::IsNullOrWhiteSpace($Standard)) { return }
 
-    $CreateStandard = $false
-    if (-not (Get-LocalUserSafe -Name $Standard)) {
-        $createChoice = Read-Host "'$Standard' does not exist. Create it with no password? (Y/N)"
-        if ($createChoice -notmatch '^(y|yes)$') { return }
-        $CreateStandard = $true
-    }
+    $saved = Get-ManagedAccounts
+    $defaultAdmin = if ($saved) { $saved.Admin } else { 'AdminControl' }
 
     $Admin = $null
     $AdminExistedAtSelection = $false
@@ -634,8 +506,8 @@ function Invoke-FullSetup {
     $ChangeExistingAdminPassword = $false
 
     :AdminSelection while ($true) {
-        $candidateAdmin = Read-Host 'Admin account name [AdminControl]'
-        if ([string]::IsNullOrWhiteSpace($candidateAdmin)) { $candidateAdmin = 'AdminControl' }
+        $candidateAdmin = Read-Host "Admin account name [$defaultAdmin]"
+        if ([string]::IsNullOrWhiteSpace($candidateAdmin)) { $candidateAdmin = $defaultAdmin }
 
         if ($Standard -ieq $candidateAdmin) {
             Write-Host 'Standard and admin account names must be different.' -ForegroundColor Red
@@ -670,6 +542,7 @@ function Invoke-FullSetup {
                 $resetConfirm = Read-Host 'Continue? (Y/N)'
                 if ($resetConfirm -match '^(y|yes)$') { $ChangeExistingAdminPassword = $true }
             }
+
             break AdminSelection
         }
         elseif ($existingChoice -eq '2') { continue AdminSelection }
@@ -690,15 +563,12 @@ function Invoke-FullSetup {
 
     Write-Host ''
     Write-Host 'S.A.L. will make these changes:' -ForegroundColor Cyan
-    if ($CreateStandard) { Write-Host "  - Create standard account '$Standard' with no password." }
     if (-not $state.AdminExists) { Write-Host "  - Create admin account '$Admin'." }
     if ($PromoteExistingAdmin) { Write-Host "  - Give '$Admin' admin access." }
     if ($ChangeExistingAdminPassword) { Write-Host "  - Change '$Admin' password." }
-
-    $signIn = Get-StandardSignInState -Name $Standard
-    if ($CreateStandard -or -not $signIn.Ready) { Write-Host "  - Make '$Standard' appear in the Windows user list." }
-    if ($state.StandardExists -and -not $state.StandardIsStandard) { Write-Host "  - Remove admin access from '$Standard'." }
-    if ($state.StandardExists -and -not $state.PasswordChangeBlocked) { Write-Host "  - Stop '$Standard' from setting or changing a password." }
+    if (-not $state.StandardIsEnabled) { Write-Host "  - Turn on '$Standard'." }
+    if (-not $state.StandardIsStandard) { Write-Host "  - Remove admin access from '$Standard'." }
+    if (-not $state.PasswordChangeBlocked) { Write-Host "  - Stop '$Standard' from setting or changing a password." }
 
     $confirm = Read-Host 'Continue? (Y/N)'
     if ($confirm -notmatch '^(y|yes)$') { return }
@@ -727,16 +597,15 @@ function Invoke-FullSetup {
             throw 'Admin access could not be confirmed, so the standard account was left unchanged.'
         }
 
-        if ($CreateStandard -and -not (Get-LocalUserSafe -Name $Standard)) {
-            New-LocalUser -Name $Standard -NoPassword -Description 'School standard account' -ErrorAction Stop | Out-Null
-            Write-Host "[OK] Standard account '$Standard' created." -ForegroundColor Green
+        $standardAccount = Get-LocalUserSafe -Name $Standard
+        if (-not $standardAccount) {
+            throw "Standard account '$Standard' no longer exists. Create it in Windows Settings and run setup again."
         }
 
-        if (-not (Get-LocalUserSafe -Name $Standard)) {
-            throw "Standard account '$Standard' could not be found or created."
+        if (-not $standardAccount.Enabled) {
+            Enable-LocalUser -Name $Standard -ErrorAction Stop
+            Write-Host "[OK] '$Standard' turned on." -ForegroundColor Green
         }
-
-        Ensure-StandardLoginVisibility -Name $Standard
 
         if (Test-LocalAdministrator -Name $Standard) {
             Remove-LocalGroupMember -Group $AdminGroup -Member $Standard -ErrorAction Stop
@@ -753,10 +622,11 @@ function Invoke-FullSetup {
         if (Test-FullyConfigured -State $finalState) {
             Save-ManagedAccounts -Standard $Standard -Admin $Admin
             Write-Host "`n[OK] Setup finished." -ForegroundColor Green
-            Write-Host 'IMPORTANT: fully sign out or restart Windows before checking the standard account in the user list.' -ForegroundColor Cyan
 
             $cleanupNow = Read-Host 'Check for old extra accounts now? (Y/N)'
-            if ($cleanupNow -match '^(y|yes)$') { Invoke-PreexistingUserCleanup -Standard $Standard -Admin $Admin }
+            if ($cleanupNow -match '^(y|yes)$') {
+                Invoke-PreexistingUserCleanup -Standard $Standard -Admin $Admin
+            }
         }
         else {
             Write-Host "`n[WARN] Some things still need attention." -ForegroundColor Yellow
@@ -788,16 +658,17 @@ function Show-StartupScreen {
         }
     }
     else {
+        $standardCount = @(Get-StandardCandidates).Count
+        Write-Host "Standard accounts found: $standardCount" -ForegroundColor DarkGray
         Write-Host 'No saved setup yet.' -ForegroundColor DarkGray
     }
 
     Write-Host ''
     Write-Host '[1] Check & fix'
     Write-Host '[2] Set up accounts'
-    Write-Host '[3] Fix standard sign-in'
-    Write-Host '[4] Admin tools'
-    Write-Host '[5] Remove extra users'
-    Write-Host '[6] Show full status'
+    Write-Host '[3] Admin tools'
+    Write-Host '[4] Remove extra users'
+    Write-Host '[5] Show full status'
     Write-Host '[0] Exit'
     Write-Host ''
 }
@@ -824,18 +695,11 @@ function Show-StartupScreen {
         '3' {
             Clear-Host
             Write-Host 'S.A.L.' -ForegroundColor Cyan
-            Write-Host 'Fix standard sign-in' -ForegroundColor DarkGray
-            Write-Host ''
-            Invoke-StandardSignInRepair
-        }
-        '4' {
-            Clear-Host
-            Write-Host 'S.A.L.' -ForegroundColor Cyan
             Write-Host 'Admin tools' -ForegroundColor DarkGray
             Write-Host ''
             Invoke-AdminMaintenance
         }
-        '5' {
+        '4' {
             Clear-Host
             Write-Host 'S.A.L.' -ForegroundColor Cyan
             Write-Host 'Remove extra users' -ForegroundColor DarkGray
@@ -849,7 +713,7 @@ function Show-StartupScreen {
                 Write-Host 'Use [2] Set up accounts first so S.A.L. knows which standard and admin accounts to keep.' -ForegroundColor Yellow
             }
         }
-        '6' { Show-Diagnostics }
+        '5' { Show-Diagnostics }
         '0' { break MainLoop }
         default { Write-Host 'Please choose one of the numbers shown in the menu.' -ForegroundColor Red }
     }
