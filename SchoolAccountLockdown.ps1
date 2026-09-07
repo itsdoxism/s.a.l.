@@ -72,6 +72,35 @@ function Test-LocalAdministrator {
     return $false
 }
 
+function Read-ConfirmedPassword {
+    param([Parameter(Mandatory=$true)][string]$Label)
+
+    $password1 = Read-Host $Label -AsSecureString
+    $password2 = Read-Host 'Confirm admin password' -AsSecureString
+
+    $ptr1 = [IntPtr]::Zero
+    $ptr2 = [IntPtr]::Zero
+
+    try {
+        $ptr1 = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($password1)
+        $ptr2 = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($password2)
+        $plain1 = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr1)
+        $plain2 = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr2)
+
+        if ($plain1 -cne $plain2) {
+            throw 'Passwords do not match.'
+        }
+    }
+    finally {
+        if ($ptr1 -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr1) }
+        if ($ptr2 -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr2) }
+        $plain1 = $null
+        $plain2 = $null
+    }
+
+    return $password1
+}
+
 function Get-DeviceState {
     param(
         [Parameter(Mandatory=$true)][string]$Student,
@@ -212,19 +241,88 @@ if (-not (Get-LocalUserSafe -Name $Student)) {
     }
 }
 
-$Admin = Read-Host 'Dedicated admin username [AdminControl]'
-if ([string]::IsNullOrWhiteSpace($Admin)) { $Admin = 'AdminControl' }
+# Resolve the dedicated administrator name. If the name already exists,
+# S.A.L. never silently takes it over: the operator explicitly chooses to use it,
+# choose a different name, or cancel.
+$Admin = $null
+$AdminExistedAtSelection = $false
+$PromoteExistingAdmin = $false
+$ChangeExistingAdminPassword = $false
 
-if ($Student -ieq $Admin) {
-    Write-Host 'ERROR: Student and admin usernames must be different.' -ForegroundColor Red
-    Read-Host 'Press Enter to exit'
-    exit 1
+:AdminSelection while ($true) {
+    $candidateAdmin = Read-Host 'Dedicated admin username [AdminControl]'
+    if ([string]::IsNullOrWhiteSpace($candidateAdmin)) { $candidateAdmin = 'AdminControl' }
+
+    if ($Student -ieq $candidateAdmin) {
+        Write-Host 'Student and dedicated admin usernames must be different. Choose another admin name.' -ForegroundColor Red
+        continue
+    }
+
+    $existingAdmin = Get-LocalUserSafe -Name $candidateAdmin
+    if (-not $existingAdmin) {
+        $Admin = $candidateAdmin
+        $AdminExistedAtSelection = $false
+        break
+    }
+
+    Write-Host ''
+    Write-Host "Local account '$candidateAdmin' already exists." -ForegroundColor Yellow
+    Write-Host '[1] Use this existing account'
+    Write-Host '[2] Choose another admin name'
+    Write-Host '[3] Cancel'
+    $existingChoice = Read-Host 'Choose [1/2/3]'
+
+    if ($existingChoice -eq '1') {
+        $Admin = $candidateAdmin
+        $AdminExistedAtSelection = $true
+        $PromoteExistingAdmin = $false
+        $ChangeExistingAdminPassword = $false
+
+        if (-not (Test-LocalAdministrator -Name $Admin)) {
+            Write-Host "'$Admin' exists but is NOT an Administrator." -ForegroundColor Yellow
+            $promoteChoice = Read-Host "Promote '$Admin' to Administrator? (Y/N)"
+            if ($promoteChoice -match '^(y|yes)$') {
+                $PromoteExistingAdmin = $true
+            }
+            else {
+                Write-Host 'Existing account was not selected as the dedicated administrator.' -ForegroundColor Yellow
+                $Admin = $null
+                continue AdminSelection
+            }
+        }
+
+        Write-Host ''
+        $changeChoice = Read-Host "Change/reset password for existing admin '$Admin'? (Y/N)"
+        if ($changeChoice -match '^(y|yes)$') {
+            Write-Host 'WARNING: Resetting another local account password can make EFS-encrypted files or saved credentials for that account inaccessible.' -ForegroundColor Yellow
+            $resetConfirm = Read-Host 'Continue with the password reset? (Y/N)'
+            if ($resetConfirm -match '^(y|yes)$') {
+                $ChangeExistingAdminPassword = $true
+            }
+        }
+
+        break AdminSelection
+    }
+    elseif ($existingChoice -eq '2') {
+        continue AdminSelection
+    }
+    elseif ($existingChoice -eq '3') {
+        Write-Host 'Cancelled. Nothing changed.' -ForegroundColor Yellow
+        Read-Host 'Press Enter to exit'
+        exit
+    }
+    else {
+        Write-Host 'Invalid choice. Choose 1, 2, or 3.' -ForegroundColor Red
+        continue AdminSelection
+    }
 }
 
 $state = Get-DeviceState -Student $Student -Admin $Admin
 Show-State -State $state
 
-if (Test-FullyConfigured -State $state) {
+$MaintenanceRequested = $PromoteExistingAdmin -or $ChangeExistingAdminPassword
+
+if ((Test-FullyConfigured -State $state) -and -not $MaintenanceRequested) {
     Write-Host 'This device is already configured.' -ForegroundColor Green
     Invoke-PreexistingUserCleanup -Student $Student -Admin $Admin
     Read-Host 'Press Enter to exit'
@@ -234,7 +332,14 @@ if (Test-FullyConfigured -State $state) {
 if ($CreateStudent) {
     Write-Host "[PLAN] Create '$Student' as a passwordless Standard User." -ForegroundColor Cyan
 }
-Write-Host 'This device is not fully configured.' -ForegroundColor Yellow
+if ($PromoteExistingAdmin) {
+    Write-Host "[PLAN] Promote existing '$Admin' to Administrator." -ForegroundColor Cyan
+}
+if ($ChangeExistingAdminPassword) {
+    Write-Host "[PLAN] Change/reset password for existing admin '$Admin'." -ForegroundColor Cyan
+}
+
+Write-Host 'This device has pending configuration/maintenance changes.' -ForegroundColor Yellow
 $confirm = Read-Host 'Apply/fix configuration? (Y/N)'
 if ($confirm -notmatch '^(y|yes)$') { exit }
 
@@ -242,32 +347,23 @@ try {
     # Create/verify the dedicated administrator first.
     if (-not $state.AdminExists) {
         Write-Host "`nCreating dedicated administrator '$Admin'..." -ForegroundColor Yellow
+        $newAdminPassword = Read-ConfirmedPassword -Label 'New admin password'
 
-        $password1 = Read-Host 'New admin password' -AsSecureString
-        $password2 = Read-Host 'Confirm admin password' -AsSecureString
-
-        $ptr1 = [IntPtr]::Zero
-        $ptr2 = [IntPtr]::Zero
-        try {
-            $ptr1 = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($password1)
-            $ptr2 = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($password2)
-            $plain1 = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr1)
-            $plain2 = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr2)
-
-            if ($plain1 -cne $plain2) { throw 'Passwords do not match.' }
-        }
-        finally {
-            if ($ptr1 -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr1) }
-            if ($ptr2 -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr2) }
-            $plain1 = $null
-            $plain2 = $null
-        }
-
-        New-LocalUser -Name $Admin -Password $password1 -Description 'Dedicated school PC administrator' -ErrorAction Stop | Out-Null
+        New-LocalUser -Name $Admin -Password $newAdminPassword -Description 'Dedicated school PC administrator' -ErrorAction Stop | Out-Null
         Write-Host '[OK] Dedicated admin account created.' -ForegroundColor Green
+    }
+    elseif ($ChangeExistingAdminPassword) {
+        $replacementPassword = Read-ConfirmedPassword -Label 'New admin password'
+        Set-LocalUser -Name $Admin -Password $replacementPassword -ErrorAction Stop
+        Write-Host "[OK] Password changed/reset for '$Admin'." -ForegroundColor Green
     }
 
     if (-not (Test-LocalAdministrator -Name $Admin)) {
+        # Existing non-admin accounts are promoted only after explicit approval above.
+        if ($AdminExistedAtSelection -and -not $PromoteExistingAdmin) {
+            throw "Existing account '$Admin' is not an Administrator and promotion was not approved."
+        }
+
         Add-LocalGroupMember -Group $AdminGroup -Member $Admin -ErrorAction Stop
         Write-Host "[OK] '$Admin' added to '$AdminGroup'." -ForegroundColor Green
     }
