@@ -1,6 +1,5 @@
 #requires -version 5.1
-# School Account Lockdown (S.A.L.)
-# Console edition for authorized school-owned Windows 11 PCs.
+# S.A.L. - simple account setup for authorized school-owned Windows 11 PCs.
 
 $ErrorActionPreference = 'Stop'
 $RawScriptUrl = 'https://raw.githubusercontent.com/itsdoxism/s.a.l./main/SchoolAccountLockdown.ps1'
@@ -17,13 +16,12 @@ function Test-IsAdministrator {
 function Ensure-Administrator {
     if (Test-IsAdministrator) { return }
 
-    Write-Host 'Administrator permission is required. Opening UAC...' -ForegroundColor Yellow
+    Write-Host 'S.A.L. needs admin access. Windows will ask for permission...' -ForegroundColor Yellow
 
     if ($PSCommandPath) {
         $args = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
     }
     else {
-        # Cache-bust the raw URL so an elevated relaunch does not pick up a stale script.
         $cacheBust = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
         $remote = "irm '${RawScriptUrl}?cb=$cacheBust' | iex"
         $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($remote))
@@ -34,15 +32,15 @@ function Ensure-Administrator {
         Start-Process powershell.exe -Verb RunAs -ArgumentList $args | Out-Null
     }
     catch {
-        Write-Host "Could not request Administrator permission: $($_.Exception.Message)" -ForegroundColor Red
-        Read-Host 'Press Enter to exit'
+        Write-Host "Could not get admin access: $($_.Exception.Message)" -ForegroundColor Red
+        Read-Host 'Press Enter to close'
     }
     exit
 }
 
 Ensure-Administrator
 
-# Snapshot users before S.A.L. creates anything. Cleanup only considers this set.
+# Keep a list of accounts that existed before S.A.L. creates anything.
 $InitialLocalUsers = @(Get-LocalUser | Select-Object Name, SID)
 
 function Get-AdminGroupName {
@@ -64,6 +62,7 @@ function Get-LocalUserSafe {
 
 function Test-LocalAdministrator {
     param([Parameter(Mandatory=$true)][string]$Name)
+
     try {
         $members = Get-LocalGroupMember -Group $AdminGroup -ErrorAction Stop
         foreach ($member in $members) {
@@ -76,8 +75,7 @@ function Test-LocalAdministrator {
 
 function Test-ComputerPartOfDomain {
     try {
-        $computer = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop
-        return [bool]$computer.PartOfDomain
+        return [bool](Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).PartOfDomain
     }
     catch { return $false }
 }
@@ -85,13 +83,13 @@ function Test-ComputerPartOfDomain {
 function Test-StudentVisibleAtLogon {
     param([Parameter(Mandatory=$true)][string]$Name)
 
-    $studentObject = Get-LocalUserSafe -Name $Name
-    if (-not $studentObject -or -not $studentObject.Enabled) { return $false }
+    $student = Get-LocalUserSafe -Name $Name
+    if (-not $student -or -not $student.Enabled) { return $false }
 
     try {
         if (Test-Path $UserListRegistryPath) {
-            $properties = Get-ItemProperty -Path $UserListRegistryPath -ErrorAction Stop
-            $entry = $properties.PSObject.Properties[$Name]
+            $props = Get-ItemProperty -Path $UserListRegistryPath -ErrorAction Stop
+            $entry = $props.PSObject.Properties[$Name]
             if ($null -ne $entry -and [int]$entry.Value -eq 0) { return $false }
         }
     }
@@ -112,12 +110,12 @@ function Test-StudentVisibleAtLogon {
 function Ensure-StudentLoginVisibility {
     param([Parameter(Mandatory=$true)][string]$Name)
 
-    $studentObject = Get-LocalUserSafe -Name $Name
-    if (-not $studentObject) { throw "Student account '$Name' does not exist." }
+    $student = Get-LocalUserSafe -Name $Name
+    if (-not $student) { throw "Student account '$Name' was not found." }
 
-    if (-not $studentObject.Enabled) {
+    if (-not $student.Enabled) {
         Enable-LocalUser -Name $Name -ErrorAction Stop
-        Write-Host "[OK] Student account '$Name' enabled." -ForegroundColor Green
+        Write-Host "[OK] '$Name' is turned on." -ForegroundColor Green
     }
 
     if (-not (Test-Path $UserListRegistryPath)) {
@@ -130,17 +128,16 @@ function Ensure-StudentLoginVisibility {
             New-Item -Path $WindowsSystemPolicyPath -Force -ErrorAction Stop | Out-Null
         }
         New-ItemProperty -Path $WindowsSystemPolicyPath -Name 'EnumerateLocalUsers' -PropertyType DWord -Value 1 -Force -ErrorAction Stop | Out-Null
-        Write-Host '[OK] Local-user enumeration enabled for this domain-joined PC.' -ForegroundColor Green
     }
 
-    Write-Host "[OK] '$Name' is configured to appear on the Windows sign-in screen." -ForegroundColor Green
+    Write-Host "[OK] '$Name' is set to show on the Windows sign-in screen." -ForegroundColor Green
 }
 
 function Read-ConfirmedPassword {
     param([Parameter(Mandatory=$true)][string]$Label)
 
     $password1 = Read-Host $Label -AsSecureString
-    $password2 = Read-Host 'Confirm admin password' -AsSecureString
+    $password2 = Read-Host 'Type the password again' -AsSecureString
     $ptr1 = [IntPtr]::Zero
     $ptr2 = [IntPtr]::Zero
 
@@ -149,7 +146,7 @@ function Read-ConfirmedPassword {
         $ptr2 = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($password2)
         $plain1 = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr1)
         $plain2 = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr2)
-        if ($plain1 -cne $plain2) { throw 'Passwords do not match.' }
+        if ($plain1 -cne $plain2) { throw 'The passwords do not match.' }
     }
     finally {
         if ($ptr1 -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr1) }
@@ -173,7 +170,7 @@ function Save-ManagedAccounts {
         New-ItemProperty -Path $SalStatePath -Name 'AdminUser' -PropertyType String -Value $Admin -Force | Out-Null
     }
     catch {
-        Write-Host "[WARN] Could not save S.A.L. managed-account state: $($_.Exception.Message)" -ForegroundColor Yellow
+        Write-Host "[WARN] S.A.L. could not remember these account names: $($_.Exception.Message)" -ForegroundColor Yellow
     }
 }
 
@@ -186,21 +183,20 @@ function Get-ManagedAccounts {
                 return [pscustomobject]@{
                     Student = [string]$saved.StudentUser
                     Admin   = [string]$saved.AdminUser
-                    Source  = 'Saved S.A.L. state'
+                    Source  = 'Saved setup'
                 }
             }
         }
     }
     catch {}
 
-    # Fallback for devices configured before saved state was introduced.
     $students = @(Get-LocalUser | Where-Object { $_.Description -eq 'School student account' })
     $admins = @(Get-LocalUser | Where-Object { $_.Description -eq 'Dedicated school PC administrator' })
     if ($students.Count -eq 1 -and $admins.Count -eq 1) {
         return [pscustomobject]@{
             Student = $students[0].Name
             Admin   = $admins[0].Name
-            Source  = 'Auto-detected S.A.L. descriptions'
+            Source  = 'Found automatically'
         }
     }
 
@@ -213,17 +209,17 @@ function Get-DeviceState {
         [Parameter(Mandatory=$true)][string]$Admin
     )
 
-    $studentObject = Get-LocalUserSafe -Name $Student
-    $adminObject = Get-LocalUserSafe -Name $Admin
+    $student = Get-LocalUserSafe -Name $Student
+    $admin = Get-LocalUserSafe -Name $Admin
 
     [pscustomobject]@{
-        AdminExists            = [bool]$adminObject
-        AdminIsAdministrator   = if ($adminObject) { Test-LocalAdministrator -Name $Admin } else { $false }
-        StudentExists          = [bool]$studentObject
-        StudentIsEnabled       = if ($studentObject) { [bool]$studentObject.Enabled } else { $false }
-        StudentVisibleAtLogon  = if ($studentObject) { Test-StudentVisibleAtLogon -Name $Student } else { $false }
-        StudentIsStandard      = if ($studentObject) { -not (Test-LocalAdministrator -Name $Student) } else { $false }
-        PasswordChangeBlocked  = if ($studentObject) { $studentObject.UserMayChangePassword -eq $false } else { $false }
+        AdminExists           = [bool]$admin
+        AdminIsAdministrator  = if ($admin) { Test-LocalAdministrator -Name $Admin } else { $false }
+        StudentExists         = [bool]$student
+        StudentIsEnabled      = if ($student) { [bool]$student.Enabled } else { $false }
+        StudentVisibleAtLogon = if ($student) { Test-StudentVisibleAtLogon -Name $Student } else { $false }
+        StudentIsStandard     = if ($student) { -not (Test-LocalAdministrator -Name $Student) } else { $false }
+        PasswordChangeBlocked = if ($student) { $student.UserMayChangePassword -eq $false } else { $false }
     }
 }
 
@@ -248,13 +244,13 @@ function Show-State {
         return '[--]'
     }
 
-    Write-Host "$(Mark $State.AdminExists) Dedicated admin account exists"
-    Write-Host "$(Mark $State.AdminIsAdministrator) Dedicated admin has Administrator rights"
-    Write-Host "$(Mark $State.StudentExists) Student account exists"
-    Write-Host "$(Mark $State.StudentIsEnabled) Student account is enabled"
-    Write-Host "$(Mark $State.StudentVisibleAtLogon) Student account is visible at sign-in"
-    Write-Host "$(Mark $State.StudentIsStandard) Student account is Standard User"
-    Write-Host "$(Mark $State.PasswordChangeBlocked) Student password creation/change is blocked"
+    Write-Host "$(Mark $State.AdminExists) Admin account found"
+    Write-Host "$(Mark $State.AdminIsAdministrator) Admin access is on"
+    Write-Host "$(Mark $State.StudentExists) Student account found"
+    Write-Host "$(Mark $State.StudentIsEnabled) Student account is active"
+    Write-Host "$(Mark $State.StudentVisibleAtLogon) Student shows on the sign-in screen"
+    Write-Host "$(Mark $State.StudentIsStandard) Student is a standard user"
+    Write-Host "$(Mark $State.PasswordChangeBlocked) Student cannot set or change a password"
 }
 
 function Get-DeviceIssues {
@@ -265,28 +261,34 @@ function Get-DeviceIssues {
 
     $state = Get-DeviceState -Student $Student -Admin $Admin
     $issues = @()
-    if (-not $state.AdminExists) { $issues += "Dedicated admin '$Admin' is missing." }
-    elseif (-not $state.AdminIsAdministrator) { $issues += "Dedicated admin '$Admin' does not have Administrator rights." }
-    if (-not $state.StudentExists) { $issues += "Student '$Student' is missing." }
-    else {
-        if (-not $state.StudentIsEnabled) { $issues += "Student '$Student' is disabled." }
-        if (-not $state.StudentVisibleAtLogon) { $issues += "Student '$Student' may be hidden from the sign-in / Switch user screen." }
-        if (-not $state.StudentIsStandard) { $issues += "Student '$Student' still has Administrator rights." }
-        if (-not $state.PasswordChangeBlocked) { $issues += "Student '$Student' can still create/change its local password." }
+
+    if (-not $state.AdminExists) { $issues += "Admin account '$Admin' is missing." }
+    elseif (-not $state.AdminIsAdministrator) { $issues += "'$Admin' is not an admin." }
+
+    if (-not $state.StudentExists) {
+        $issues += "Student account '$Student' is missing."
     }
+    else {
+        if (-not $state.StudentIsEnabled) { $issues += "Student account '$Student' is turned off." }
+        if (-not $state.StudentVisibleAtLogon) { $issues += "Student account '$Student' is hidden from the sign-in screen." }
+        if (-not $state.StudentIsStandard) { $issues += "Student account '$Student' has admin access." }
+        if (-not $state.PasswordChangeBlocked) { $issues += "Student account '$Student' can set or change a password." }
+    }
+
     return @($issues)
 }
 
 function Show-LocalUsers {
     Write-Host ''
-    Write-Host 'Local users:' -ForegroundColor Yellow
+    Write-Host 'Accounts on this PC:' -ForegroundColor Yellow
+
     $rows = foreach ($user in Get-LocalUser) {
         if ($user.Name -in @('DefaultAccount','WDAGUtilityAccount')) { continue }
         [pscustomobject]@{
             Name = $user.Name
-            Enabled = $user.Enabled
-            Administrator = Test-LocalAdministrator -Name $user.Name
-            MayChangePassword = $user.UserMayChangePassword
+            Active = $user.Enabled
+            Admin = Test-LocalAdministrator -Name $user.Name
+            CanChangePassword = $user.UserMayChangePassword
         }
     }
     $rows | Format-Table -AutoSize
@@ -294,29 +296,32 @@ function Show-LocalUsers {
 
 function Show-Diagnostics {
     Clear-Host
-    Write-Host 'S.A.L. DIAGNOSTICS' -ForegroundColor Cyan
+    Write-Host 'S.A.L.' -ForegroundColor Cyan
+    Write-Host 'Full status' -ForegroundColor DarkGray
     Show-LocalUsers
 
     $managed = Get-ManagedAccounts
     Write-Host ''
     if ($managed) {
-        Write-Host "Managed student : $($managed.Student)" -ForegroundColor Cyan
-        Write-Host "Managed admin   : $($managed.Admin)" -ForegroundColor Cyan
-        Write-Host "Detected from   : $($managed.Source)" -ForegroundColor DarkGray
+        Write-Host "Student: $($managed.Student)" -ForegroundColor Cyan
+        Write-Host "Admin  : $($managed.Admin)" -ForegroundColor Cyan
+        Write-Host "Source : $($managed.Source)" -ForegroundColor DarkGray
         Write-Host ''
+
         $state = Get-DeviceState -Student $managed.Student -Admin $managed.Admin
         Show-State -State $state
         $issues = @(Get-DeviceIssues -Student $managed.Student -Admin $managed.Admin)
+
         if ($issues.Count -eq 0) {
-            Write-Host "`n[OK] No managed-account issues detected." -ForegroundColor Green
+            Write-Host "`n[OK] Everything looks good." -ForegroundColor Green
         }
         else {
-            Write-Host "`nDetected issues:" -ForegroundColor Yellow
+            Write-Host "`nThings to fix:" -ForegroundColor Yellow
             foreach ($issue in $issues) { Write-Host "  - $issue" -ForegroundColor Yellow }
         }
     }
     else {
-        Write-Host 'No saved/auto-detected S.A.L. managed account pair was found.' -ForegroundColor Yellow
+        Write-Host 'S.A.L. does not know the student/admin pair yet. Use [2] Set up accounts first.' -ForegroundColor Yellow
     }
 }
 
@@ -341,31 +346,32 @@ function Invoke-PreexistingUserCleanup {
     )
 
     if ($candidates.Count -eq 0) {
-        Write-Host '[OK] No extra pre-existing local users found.' -ForegroundColor Green
+        Write-Host '[OK] No extra old accounts found.' -ForegroundColor Green
         return
     }
 
     Write-Host ''
-    Write-Host 'Extra local users that existed BEFORE this S.A.L. run:' -ForegroundColor Yellow
+    Write-Host 'Extra accounts found:' -ForegroundColor Yellow
     foreach ($candidate in $candidates) {
         $suffix = ''
-        if ($candidate.Name -ieq [Environment]::UserName) { $suffix = '  [CURRENT SESSION]' }
+        if ($candidate.Name -ieq [Environment]::UserName) { $suffix = '  [YOU ARE USING THIS NOW]' }
         Write-Host "  - $($candidate.Name)$suffix"
     }
 
     Write-Host ''
-    Write-Host 'Managed student/admin, Windows built-ins, and accounts created during this run are protected.' -ForegroundColor DarkGray
-    Write-Host 'Only local account objects are removed; profile folders/data are not deleted.' -ForegroundColor DarkGray
-    $cleanupChoice = Read-Host 'Delete ALL listed pre-existing local users? (Y/N)'
+    Write-Host 'The student, admin, Windows system accounts, and accounts created during this run are protected.' -ForegroundColor DarkGray
+    Write-Host 'This removes the account only. Files in C:\Users are not deleted.' -ForegroundColor DarkGray
+
+    $cleanupChoice = Read-Host 'Remove all accounts listed above? (Y/N)'
     if ($cleanupChoice -notmatch '^(y|yes)$') {
-        Write-Host '[SKIP] Extra local users were left unchanged.' -ForegroundColor Yellow
+        Write-Host '[SKIP] Nothing was removed.' -ForegroundColor Yellow
         return
     }
 
     foreach ($candidate in $candidates) {
         try {
             Remove-LocalUser -Name $candidate.Name -ErrorAction Stop
-            Write-Host "[OK] Removed local user '$($candidate.Name)'." -ForegroundColor Green
+            Write-Host "[OK] Removed '$($candidate.Name)'." -ForegroundColor Green
         }
         catch {
             Write-Host "[WARN] Could not remove '$($candidate.Name)': $($_.Exception.Message)" -ForegroundColor Yellow
@@ -376,74 +382,78 @@ function Invoke-PreexistingUserCleanup {
 function Invoke-SmartRepair {
     $managed = Get-ManagedAccounts
     if (-not $managed) {
-        Write-Host 'No managed account pair is known yet. Run [2] Setup / reconfigure first.' -ForegroundColor Yellow
+        Write-Host 'No saved setup yet. Use [2] Set up accounts first.' -ForegroundColor Yellow
         return
     }
 
     $Student = $managed.Student
     $Admin = $managed.Admin
-    Write-Host "Managed student: $Student"
-    Write-Host "Managed admin  : $Admin"
+
+    Write-Host "Student: $Student"
+    Write-Host "Admin  : $Admin"
     Write-Host ''
 
     $state = Get-DeviceState -Student $Student -Admin $Admin
     Show-State -State $state
     $issues = @(Get-DeviceIssues -Student $Student -Admin $Admin)
+
     if ($issues.Count -eq 0) {
-        Write-Host "`n[OK] This setup is healthy. Nothing to repair." -ForegroundColor Green
+        Write-Host "`n[OK] Everything looks good. Nothing to fix." -ForegroundColor Green
         return
     }
 
-    Write-Host "`nDetected issues:" -ForegroundColor Yellow
+    Write-Host "`nFound $($issues.Count) thing(s) to fix:" -ForegroundColor Yellow
     foreach ($issue in $issues) { Write-Host "  - $issue" -ForegroundColor Yellow }
     Write-Host ''
-    $confirm = Read-Host 'Repair all detected managed-account issues? (Y/N)'
+
+    $confirm = Read-Host 'Fix everything listed above? (Y/N)'
     if ($confirm -notmatch '^(y|yes)$') { return }
 
     try {
         if (-not (Get-LocalUserSafe -Name $Admin)) {
-            Write-Host "Creating missing dedicated administrator '$Admin'..." -ForegroundColor Yellow
+            Write-Host "Admin account '$Admin' is missing. Creating it..." -ForegroundColor Yellow
             $newAdminPassword = Read-ConfirmedPassword -Label 'New admin password'
             New-LocalUser -Name $Admin -Password $newAdminPassword -Description 'Dedicated school PC administrator' -ErrorAction Stop | Out-Null
-            Write-Host "[OK] Dedicated admin '$Admin' created." -ForegroundColor Green
+            Write-Host "[OK] Admin account '$Admin' created." -ForegroundColor Green
         }
 
         if (-not (Test-LocalAdministrator -Name $Admin)) {
             Add-LocalGroupMember -Group $AdminGroup -Member $Admin -ErrorAction Stop
-            Write-Host "[OK] '$Admin' granted Administrator rights." -ForegroundColor Green
+            Write-Host "[OK] Admin access turned on for '$Admin'." -ForegroundColor Green
         }
 
         if (-not (Test-LocalAdministrator -Name $Admin)) {
-            throw 'Dedicated administrator could not be verified. Student account was not changed.'
+            throw 'Admin access could not be confirmed, so the student account was left unchanged.'
         }
 
         if (-not (Get-LocalUserSafe -Name $Student)) {
-            $createStudent = Read-Host "Student '$Student' is missing. Create it as a passwordless Standard User? (Y/N)"
-            if ($createStudent -notmatch '^(y|yes)$') { throw 'Student repair cancelled because the managed student account is missing.' }
+            $createStudent = Read-Host "Student account '$Student' is missing. Create it with no password? (Y/N)"
+            if ($createStudent -notmatch '^(y|yes)$') { throw 'Fix cancelled because the student account is missing.' }
             New-LocalUser -Name $Student -NoPassword -Description 'School student account' -ErrorAction Stop | Out-Null
-            Write-Host "[OK] Passwordless student '$Student' created." -ForegroundColor Green
+            Write-Host "[OK] Student account '$Student' created." -ForegroundColor Green
         }
 
         Ensure-StudentLoginVisibility -Name $Student
 
         if (Test-LocalAdministrator -Name $Student) {
             Remove-LocalGroupMember -Group $AdminGroup -Member $Student -ErrorAction Stop
-            Write-Host "[OK] '$Student' changed to Standard User." -ForegroundColor Green
+            Write-Host "[OK] Admin access removed from '$Student'." -ForegroundColor Green
         }
 
         Set-LocalUser -Name $Student -UserMayChangePassword $false -ErrorAction Stop
-        Write-Host "[OK] Password creation/change blocked for '$Student'." -ForegroundColor Green
+        Write-Host "[OK] '$Student' can no longer set or change a password." -ForegroundColor Green
 
         $finalState = Get-DeviceState -Student $Student -Admin $Admin
         Write-Host ''
         Show-State -State $finalState
+
         if (Test-FullyConfigured -State $finalState) {
             Save-ManagedAccounts -Student $Student -Admin $Admin
-            Write-Host "`nDONE - All detected managed-account issues were repaired." -ForegroundColor Green
-            Write-Host 'Sign out or restart once if the student tile does not refresh immediately.' -ForegroundColor Cyan
+            Write-Host "`n[OK] Fixed." -ForegroundColor Green
+            Write-Host 'If the student still does not appear on the sign-in screen, sign out or restart once.' -ForegroundColor Cyan
         }
         else {
-            Write-Host "`nWARNING - Some issues remain." -ForegroundColor Yellow
+            Write-Host "`n[WARN] Some things still need attention." -ForegroundColor Yellow
         }
     }
     catch {
@@ -454,28 +464,29 @@ function Invoke-SmartRepair {
 function Invoke-StudentSignInRepair {
     $managed = Get-ManagedAccounts
     $defaultStudent = if ($managed) { $managed.Student } else { '' }
+
     if ($defaultStudent) {
-        $Student = Read-Host "Student username [$defaultStudent]"
+        $Student = Read-Host "Student account [$defaultStudent]"
         if ([string]::IsNullOrWhiteSpace($Student)) { $Student = $defaultStudent }
     }
     else {
-        $Student = Read-Host 'Student username'
+        $Student = Read-Host 'Student account name'
     }
 
     if ([string]::IsNullOrWhiteSpace($Student)) { return }
     if (-not (Get-LocalUserSafe -Name $Student)) {
-        Write-Host "Student '$Student' does not exist." -ForegroundColor Red
+        Write-Host "Student account '$Student' was not found." -ForegroundColor Red
         return
     }
 
     try {
         Ensure-StudentLoginVisibility -Name $Student
         if (Test-StudentVisibleAtLogon -Name $Student) {
-            Write-Host "[OK] '$Student' is enabled and configured for sign-in visibility." -ForegroundColor Green
-            Write-Host 'Sign out or restart once if Windows has not refreshed the account tile yet.' -ForegroundColor Cyan
+            Write-Host "[OK] '$Student' is ready to show on the sign-in screen." -ForegroundColor Green
+            Write-Host 'If it still does not appear, sign out or restart once.' -ForegroundColor Cyan
         }
         else {
-            Write-Host '[WARN] Windows still reports the account as not fully visible.' -ForegroundColor Yellow
+            Write-Host '[WARN] Windows still reports a sign-in visibility problem.' -ForegroundColor Yellow
         }
     }
     catch {
@@ -486,42 +497,45 @@ function Invoke-StudentSignInRepair {
 function Invoke-AdminMaintenance {
     $managed = Get-ManagedAccounts
     $defaultAdmin = if ($managed) { $managed.Admin } else { 'AdminControl' }
-    $Admin = Read-Host "Admin username [$defaultAdmin]"
+
+    $Admin = Read-Host "Admin account [$defaultAdmin]"
     if ([string]::IsNullOrWhiteSpace($Admin)) { $Admin = $defaultAdmin }
 
     if ($managed -and $Admin -ieq $managed.Student) {
-        Write-Host 'The managed student account cannot be used as the dedicated admin.' -ForegroundColor Red
+        Write-Host 'The student account cannot be used as the admin account.' -ForegroundColor Red
         return
     }
 
     $account = Get-LocalUserSafe -Name $Admin
+
     try {
         if (-not $account) {
-            $create = Read-Host "Admin '$Admin' does not exist. Create it? (Y/N)"
+            $create = Read-Host "'$Admin' does not exist. Create this admin account? (Y/N)"
             if ($create -notmatch '^(y|yes)$') { return }
+
             $password = Read-ConfirmedPassword -Label 'New admin password'
             New-LocalUser -Name $Admin -Password $password -Description 'Dedicated school PC administrator' -ErrorAction Stop | Out-Null
             Add-LocalGroupMember -Group $AdminGroup -Member $Admin -ErrorAction Stop
-            Write-Host "[OK] '$Admin' created and granted Administrator rights." -ForegroundColor Green
+            Write-Host "[OK] '$Admin' created with admin access." -ForegroundColor Green
             return
         }
 
         if (-not (Test-LocalAdministrator -Name $Admin)) {
-            $promote = Read-Host "'$Admin' is not an Administrator. Promote it? (Y/N)"
+            $promote = Read-Host "'$Admin' does not have admin access. Turn it on? (Y/N)"
             if ($promote -match '^(y|yes)$') {
                 Add-LocalGroupMember -Group $AdminGroup -Member $Admin -ErrorAction Stop
-                Write-Host "[OK] '$Admin' granted Administrator rights." -ForegroundColor Green
+                Write-Host "[OK] Admin access turned on for '$Admin'." -ForegroundColor Green
             }
         }
 
-        $change = Read-Host "Change/reset password for '$Admin'? (Y/N)"
+        $change = Read-Host "Change the password for '$Admin'? (Y/N)"
         if ($change -match '^(y|yes)$') {
-            Write-Host 'WARNING: An administrator reset can affect EFS-encrypted files or saved credentials owned by that account.' -ForegroundColor Yellow
+            Write-Host 'Note: resetting another account password can affect encrypted files or saved sign-ins owned by that account.' -ForegroundColor Yellow
             $confirmReset = Read-Host 'Continue? (Y/N)'
             if ($confirmReset -match '^(y|yes)$') {
                 $replacementPassword = Read-ConfirmedPassword -Label 'New admin password'
                 Set-LocalUser -Name $Admin -Password $replacementPassword -ErrorAction Stop
-                Write-Host "[OK] Password changed/reset for '$Admin'." -ForegroundColor Green
+                Write-Host "[OK] Password changed for '$Admin'." -ForegroundColor Green
             }
         }
     }
@@ -533,16 +547,15 @@ function Invoke-AdminMaintenance {
 function Invoke-FullSetup {
     Show-LocalUsers
 
-    $Student = Read-Host 'Student username'
+    $Student = Read-Host 'Student account name'
     if ([string]::IsNullOrWhiteSpace($Student)) {
-        Write-Host 'Student username cannot be empty.' -ForegroundColor Red
+        Write-Host 'Student account name cannot be empty.' -ForegroundColor Red
         return
     }
 
     $CreateStudent = $false
     if (-not (Get-LocalUserSafe -Name $Student)) {
-        Write-Host "Student '$Student' does not exist." -ForegroundColor Yellow
-        $createChoice = Read-Host "Create '$Student' as a passwordless Standard User? (Y/N)"
+        $createChoice = Read-Host "'$Student' does not exist. Create it with no password? (Y/N)"
         if ($createChoice -notmatch '^(y|yes)$') { return }
         $CreateStudent = $true
     }
@@ -553,11 +566,11 @@ function Invoke-FullSetup {
     $ChangeExistingAdminPassword = $false
 
     :AdminSelection while ($true) {
-        $candidateAdmin = Read-Host 'Dedicated admin username [AdminControl]'
+        $candidateAdmin = Read-Host 'Admin account name [AdminControl]'
         if ([string]::IsNullOrWhiteSpace($candidateAdmin)) { $candidateAdmin = 'AdminControl' }
 
         if ($Student -ieq $candidateAdmin) {
-            Write-Host 'Student and dedicated admin usernames must be different.' -ForegroundColor Red
+            Write-Host 'Student and admin account names must be different.' -ForegroundColor Red
             continue
         }
 
@@ -567,113 +580,130 @@ function Invoke-FullSetup {
             break
         }
 
-        Write-Host "`nLocal account '$candidateAdmin' already exists." -ForegroundColor Yellow
-        Write-Host '[1] Use this existing account'
-        Write-Host '[2] Choose another admin name'
+        Write-Host "`nAccount '$candidateAdmin' already exists." -ForegroundColor Yellow
+        Write-Host '[1] Use this account'
+        Write-Host '[2] Pick another name'
         Write-Host '[3] Cancel'
-        $existingChoice = Read-Host 'Choose [1/2/3]'
+        $existingChoice = Read-Host 'Choose 1, 2, or 3'
 
         if ($existingChoice -eq '1') {
             $Admin = $candidateAdmin
             $AdminExistedAtSelection = $true
 
             if (-not (Test-LocalAdministrator -Name $Admin)) {
-                $promoteChoice = Read-Host "'$Admin' is not an Administrator. Promote it? (Y/N)"
-                if ($promoteChoice -match '^(y|yes)$') { $PromoteExistingAdmin = $true }
-                else { $Admin = $null; continue AdminSelection }
+                $promoteChoice = Read-Host "'$Admin' is not an admin. Give it admin access? (Y/N)"
+                if ($promoteChoice -match '^(y|yes)$') {
+                    $PromoteExistingAdmin = $true
+                }
+                else {
+                    $Admin = $null
+                    continue AdminSelection
+                }
             }
 
-            $changeChoice = Read-Host "Change/reset password for existing admin '$Admin'? (Y/N)"
+            $changeChoice = Read-Host "Change the password for '$Admin'? (Y/N)"
             if ($changeChoice -match '^(y|yes)$') {
-                Write-Host 'WARNING: Resetting another local account password can affect EFS-encrypted files or saved credentials.' -ForegroundColor Yellow
-                $resetConfirm = Read-Host 'Continue with password reset? (Y/N)'
+                Write-Host 'Note: resetting another account password can affect encrypted files or saved sign-ins owned by that account.' -ForegroundColor Yellow
+                $resetConfirm = Read-Host 'Continue? (Y/N)'
                 if ($resetConfirm -match '^(y|yes)$') { $ChangeExistingAdminPassword = $true }
             }
             break AdminSelection
         }
-        elseif ($existingChoice -eq '2') { continue AdminSelection }
-        elseif ($existingChoice -eq '3') { return }
-        else { Write-Host 'Invalid choice.' -ForegroundColor Red }
+        elseif ($existingChoice -eq '2') {
+            continue AdminSelection
+        }
+        elseif ($existingChoice -eq '3') {
+            return
+        }
+        else {
+            Write-Host 'Please choose 1, 2, or 3.' -ForegroundColor Red
+        }
     }
 
     $state = Get-DeviceState -Student $Student -Admin $Admin
     Write-Host ''
     Show-State -State $state
-    $MaintenanceRequested = $PromoteExistingAdmin -or $ChangeExistingAdminPassword
 
+    $MaintenanceRequested = $PromoteExistingAdmin -or $ChangeExistingAdminPassword
     if ((Test-FullyConfigured -State $state) -and -not $MaintenanceRequested) {
         Save-ManagedAccounts -Student $Student -Admin $Admin
-        Write-Host "`n[OK] This device is already configured. Managed-account state saved." -ForegroundColor Green
+        Write-Host "`n[OK] This PC is already set up." -ForegroundColor Green
         return
     }
 
     Write-Host ''
-    if ($CreateStudent) { Write-Host "[PLAN] Create passwordless Standard User '$Student'." -ForegroundColor Cyan }
-    if (-not $state.AdminExists) { Write-Host "[PLAN] Create dedicated admin '$Admin'." -ForegroundColor Cyan }
-    if ($PromoteExistingAdmin) { Write-Host "[PLAN] Promote '$Admin' to Administrator." -ForegroundColor Cyan }
-    if ($ChangeExistingAdminPassword) { Write-Host "[PLAN] Change/reset '$Admin' password." -ForegroundColor Cyan }
+    Write-Host 'S.A.L. will make these changes:' -ForegroundColor Cyan
+    if ($CreateStudent) { Write-Host "  - Create student account '$Student' with no password." }
+    if (-not $state.AdminExists) { Write-Host "  - Create admin account '$Admin'." }
+    if ($PromoteExistingAdmin) { Write-Host "  - Give '$Admin' admin access." }
+    if ($ChangeExistingAdminPassword) { Write-Host "  - Change '$Admin' password." }
     if ($state.StudentExists -and (-not $state.StudentIsEnabled -or -not $state.StudentVisibleAtLogon)) {
-        Write-Host "[PLAN] Enable/unhide '$Student' for Windows sign-in." -ForegroundColor Cyan
+        Write-Host "  - Make '$Student' active and visible on the sign-in screen."
     }
-    if ($state.StudentExists -and -not $state.StudentIsStandard) { Write-Host "[PLAN] Remove Administrator rights from '$Student'." -ForegroundColor Cyan }
-    if ($state.StudentExists -and -not $state.PasswordChangeBlocked) { Write-Host "[PLAN] Block student password creation/change." -ForegroundColor Cyan }
+    if ($state.StudentExists -and -not $state.StudentIsStandard) { Write-Host "  - Remove admin access from '$Student'." }
+    if ($state.StudentExists -and -not $state.PasswordChangeBlocked) { Write-Host "  - Stop '$Student' from setting or changing a password." }
 
-    $confirm = Read-Host 'Apply configuration/maintenance changes? (Y/N)'
+    $confirm = Read-Host 'Continue? (Y/N)'
     if ($confirm -notmatch '^(y|yes)$') { return }
 
     try {
         if (-not $state.AdminExists) {
             $newAdminPassword = Read-ConfirmedPassword -Label 'New admin password'
             New-LocalUser -Name $Admin -Password $newAdminPassword -Description 'Dedicated school PC administrator' -ErrorAction Stop | Out-Null
-            Write-Host "[OK] Dedicated admin '$Admin' created." -ForegroundColor Green
+            Write-Host "[OK] Admin account '$Admin' created." -ForegroundColor Green
         }
         elseif ($ChangeExistingAdminPassword) {
             $replacementPassword = Read-ConfirmedPassword -Label 'New admin password'
             Set-LocalUser -Name $Admin -Password $replacementPassword -ErrorAction Stop
-            Write-Host "[OK] Password changed/reset for '$Admin'." -ForegroundColor Green
+            Write-Host "[OK] Password changed for '$Admin'." -ForegroundColor Green
         }
 
         if (-not (Test-LocalAdministrator -Name $Admin)) {
             if ($AdminExistedAtSelection -and -not $PromoteExistingAdmin) {
-                throw "Existing account '$Admin' is not an Administrator and promotion was not approved."
+                throw "'$Admin' is not an admin and permission to change that was not given."
             }
+
             Add-LocalGroupMember -Group $AdminGroup -Member $Admin -ErrorAction Stop
-            Write-Host "[OK] '$Admin' granted Administrator rights." -ForegroundColor Green
+            Write-Host "[OK] Admin access turned on for '$Admin'." -ForegroundColor Green
         }
 
         if (-not (Test-LocalAdministrator -Name $Admin)) {
-            throw 'Dedicated administrator could not be verified. Student account was not changed.'
+            throw 'Admin access could not be confirmed, so the student account was left unchanged.'
         }
 
         if ($CreateStudent -and -not (Get-LocalUserSafe -Name $Student)) {
             New-LocalUser -Name $Student -NoPassword -Description 'School student account' -ErrorAction Stop | Out-Null
-            Write-Host "[OK] Passwordless student '$Student' created." -ForegroundColor Green
+            Write-Host "[OK] Student account '$Student' created." -ForegroundColor Green
         }
 
-        if (-not (Get-LocalUserSafe -Name $Student)) { throw "Student '$Student' could not be found or created." }
+        if (-not (Get-LocalUserSafe -Name $Student)) { throw "Student account '$Student' could not be found or created." }
 
         Ensure-StudentLoginVisibility -Name $Student
 
         if (Test-LocalAdministrator -Name $Student) {
             Remove-LocalGroupMember -Group $AdminGroup -Member $Student -ErrorAction Stop
-            Write-Host "[OK] '$Student' changed to Standard User." -ForegroundColor Green
+            Write-Host "[OK] Admin access removed from '$Student'." -ForegroundColor Green
         }
 
         Set-LocalUser -Name $Student -UserMayChangePassword $false -ErrorAction Stop
-        Write-Host "[OK] Password creation/change blocked for '$Student'." -ForegroundColor Green
+        Write-Host "[OK] '$Student' can no longer set or change a password." -ForegroundColor Green
 
         $finalState = Get-DeviceState -Student $Student -Admin $Admin
         Write-Host ''
         Show-State -State $finalState
+
         if (Test-FullyConfigured -State $finalState) {
             Save-ManagedAccounts -Student $Student -Admin $Admin
-            Write-Host "`nDONE - This laptop is configured." -ForegroundColor Green
-            Write-Host 'Sign out or restart once if the new student tile is not visible immediately.' -ForegroundColor Cyan
-            $cleanupNow = Read-Host 'Check for extra pre-existing local users now? (Y/N)'
-            if ($cleanupNow -match '^(y|yes)$') { Invoke-PreexistingUserCleanup -Student $Student -Admin $Admin }
+            Write-Host "`n[OK] Setup finished." -ForegroundColor Green
+            Write-Host 'If the new student account does not appear right away, sign out or restart once.' -ForegroundColor Cyan
+
+            $cleanupNow = Read-Host 'Check for old extra accounts now? (Y/N)'
+            if ($cleanupNow -match '^(y|yes)$') {
+                Invoke-PreexistingUserCleanup -Student $Student -Admin $Admin
+            }
         }
         else {
-            Write-Host "`nWARNING - Some settings are still incomplete." -ForegroundColor Yellow
+            Write-Host "`n[WARN] Some things still need attention." -ForegroundColor Yellow
         }
     }
     catch {
@@ -683,36 +713,35 @@ function Invoke-FullSetup {
 
 function Show-StartupScreen {
     Clear-Host
-    Write-Host '==============================================' -ForegroundColor Cyan
-    Write-Host '       SCHOOL ACCOUNT LOCKDOWN (S.A.L.)' -ForegroundColor Cyan
-    Write-Host '==============================================' -ForegroundColor Cyan
-    Write-Host 'For authorized school-owned PCs only.'
+    Write-Host 'S.A.L.' -ForegroundColor Cyan
+    Write-Host 'School PC account setup' -ForegroundColor DarkGray
     Write-Host ''
 
     $managed = Get-ManagedAccounts
     if ($managed) {
-        Write-Host "Managed student: $($managed.Student)" -ForegroundColor Cyan
-        Write-Host "Managed admin  : $($managed.Admin)" -ForegroundColor Cyan
+        Write-Host "Student: $($managed.Student)" -ForegroundColor Cyan
+        Write-Host "Admin  : $($managed.Admin)" -ForegroundColor Cyan
+
         $issues = @(Get-DeviceIssues -Student $managed.Student -Admin $managed.Admin)
         if ($issues.Count -eq 0) {
-            Write-Host '[OK] Quick scan: managed setup looks healthy.' -ForegroundColor Green
+            Write-Host '[OK] Everything looks good.' -ForegroundColor Green
         }
         else {
-            Write-Host "[!] Quick scan found $($issues.Count) issue(s):" -ForegroundColor Yellow
+            Write-Host "[!] Found $($issues.Count) thing(s) to fix:" -ForegroundColor Yellow
             foreach ($issue in $issues) { Write-Host "    - $issue" -ForegroundColor Yellow }
         }
     }
     else {
-        Write-Host '[--] No managed S.A.L. account pair saved/detected yet.' -ForegroundColor DarkGray
+        Write-Host 'No saved setup yet.' -ForegroundColor DarkGray
     }
 
     Write-Host ''
-    Write-Host '[1] Smart scan + repair managed setup'
-    Write-Host '[2] Setup / reconfigure student + admin'
-    Write-Host '[3] Repair student sign-in visibility'
-    Write-Host '[4] Admin account maintenance'
-    Write-Host '[5] Extra local-user cleanup'
-    Write-Host '[6] Full diagnostics'
+    Write-Host '[1] Check & fix'
+    Write-Host '[2] Set up accounts'
+    Write-Host '[3] Fix student sign-in'
+    Write-Host '[4] Admin tools'
+    Write-Host '[5] Remove extra users'
+    Write-Host '[6] Show full status'
     Write-Host '[0] Exit'
     Write-Host ''
 }
@@ -722,23 +751,53 @@ while ($true) {
     $choice = Read-Host 'Choose an option'
 
     switch ($choice) {
-        '1' { Clear-Host; Write-Host 'SMART REPAIR' -ForegroundColor Cyan; Invoke-SmartRepair }
-        '2' { Clear-Host; Write-Host 'SETUP / RECONFIGURE' -ForegroundColor Cyan; Invoke-FullSetup }
-        '3' { Clear-Host; Write-Host 'STUDENT SIGN-IN REPAIR' -ForegroundColor Cyan; Invoke-StudentSignInRepair }
-        '4' { Clear-Host; Write-Host 'ADMIN MAINTENANCE' -ForegroundColor Cyan; Invoke-AdminMaintenance }
+        '1' {
+            Clear-Host
+            Write-Host 'S.A.L.' -ForegroundColor Cyan
+            Write-Host 'Check & fix' -ForegroundColor DarkGray
+            Write-Host ''
+            Invoke-SmartRepair
+        }
+        '2' {
+            Clear-Host
+            Write-Host 'S.A.L.' -ForegroundColor Cyan
+            Write-Host 'Set up accounts' -ForegroundColor DarkGray
+            Invoke-FullSetup
+        }
+        '3' {
+            Clear-Host
+            Write-Host 'S.A.L.' -ForegroundColor Cyan
+            Write-Host 'Fix student sign-in' -ForegroundColor DarkGray
+            Write-Host ''
+            Invoke-StudentSignInRepair
+        }
+        '4' {
+            Clear-Host
+            Write-Host 'S.A.L.' -ForegroundColor Cyan
+            Write-Host 'Admin tools' -ForegroundColor DarkGray
+            Write-Host ''
+            Invoke-AdminMaintenance
+        }
         '5' {
             Clear-Host
-            Write-Host 'EXTRA LOCAL-USER CLEANUP' -ForegroundColor Cyan
+            Write-Host 'S.A.L.' -ForegroundColor Cyan
+            Write-Host 'Remove extra users' -ForegroundColor DarkGray
+            Write-Host ''
+
             $managed = Get-ManagedAccounts
-            if ($managed) { Invoke-PreexistingUserCleanup -Student $managed.Student -Admin $managed.Admin }
-            else { Write-Host 'Run Setup / reconfigure first so S.A.L. knows which student/admin accounts must be protected.' -ForegroundColor Yellow }
+            if ($managed) {
+                Invoke-PreexistingUserCleanup -Student $managed.Student -Admin $managed.Admin
+            }
+            else {
+                Write-Host 'Use [2] Set up accounts first so S.A.L. knows which student and admin accounts to keep.' -ForegroundColor Yellow
+            }
         }
         '6' { Show-Diagnostics }
         '0' { break }
-        default { Write-Host 'Invalid option.' -ForegroundColor Red }
+        default { Write-Host 'Please choose one of the numbers shown in the menu.' -ForegroundColor Red }
     }
 
     if ($choice -eq '0') { break }
     Write-Host ''
-    Read-Host 'Press Enter to return to the main menu'
+    Read-Host 'Press Enter to go back'
 }
