@@ -11,7 +11,13 @@ It checks the machine first and only applies missing settings.
 - If that student account does not exist, S.A.L. can create it as a **passwordless Standard User**.
 - Lets you choose the dedicated admin account name (default: `AdminControl`).
 - Creates the dedicated admin account if it does not exist.
-- Asks you to enter and confirm the admin password when creating that account. S.A.L. does not impose its own minimum length; Windows password policy still applies.
+- If the chosen admin name already exists, S.A.L. does **not** silently reuse it. It asks whether to:
+  1. use the existing account;
+  2. choose another admin name; or
+  3. cancel.
+- If an existing chosen account is not an Administrator, S.A.L. asks for permission before promoting it.
+- For an existing chosen admin, S.A.L. can optionally change/reset its password after an additional confirmation.
+- S.A.L. does not impose its own password minimum length; Windows password policy still applies.
 - Ensures the dedicated account is in the local Administrators group.
 - Changes an existing selected student account to Standard User if necessary.
 - Sets `UserMayChangePassword` to `False` for the student account.
@@ -33,17 +39,42 @@ If PowerShell is not already elevated, S.A.L. requests Administrator permission 
 
 ## New laptop flow
 
-A typical fresh setup can now be done entirely inside S.A.L.:
+A typical fresh setup can be done entirely inside S.A.L.:
 
 1. Enter the desired student username.
 2. If it does not exist, answer `Y` to create it as a passwordless Standard User.
 3. Enter the dedicated admin username, or press Enter for `AdminControl`.
 4. If the admin account does not exist, enter its password twice.
-5. Confirm the changes with `Y`.
-6. S.A.L. verifies the final state and prints `DONE` when complete.
-7. If other pre-existing local users are found, S.A.L. lists them and asks whether to remove all listed accounts.
+5. If that admin name already exists, explicitly choose whether to use it, choose another name, or cancel.
+6. If the existing account is not already an Administrator, approve or reject promotion.
+7. Optionally change/reset the existing admin password.
+8. Confirm pending changes with `Y`.
+9. S.A.L. verifies the final state and prints `DONE` when complete.
+10. If other pre-existing local users are found, S.A.L. lists them and asks whether to remove all listed accounts.
 
-The dedicated administrator is created and verified **before** S.A.L. changes or locks down the student account.
+The dedicated administrator is created or verified **before** S.A.L. changes or locks down the student account.
+
+## Existing admin maintenance
+
+When the requested dedicated admin name is already in use:
+
+```text
+Local account 'AdminControl' already exists.
+
+[1] Use this existing account
+[2] Choose another admin name
+[3] Cancel
+```
+
+If you choose the existing account and it is not an Administrator, S.A.L. asks before promoting it.
+
+It then asks:
+
+```text
+Change/reset password for existing admin 'AdminControl'? (Y/N)
+```
+
+Choosing `Y` requires another confirmation before the password is reset. Windows may make EFS-encrypted files or saved credentials belonging to that existing account inaccessible after an administrator password reset, so S.A.L. shows a warning first.
 
 ## Extra-user cleanup safety
 
@@ -79,7 +110,7 @@ A device is considered fully configured when:
 - the student account is not an Administrator;
 - the student cannot change/create its own local-account password.
 
-When all checks pass, the program shows:
+When all checks pass and no admin-maintenance change is pending, the program shows:
 
 ```text
 This device is already configured.
