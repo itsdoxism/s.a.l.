@@ -11,7 +11,7 @@ It checks the machine first and only applies missing settings.
 - If that student account does not exist, S.A.L. can create it as a **passwordless Standard User**.
 - Lets you choose the dedicated admin account name (default: `AdminControl`).
 - Creates the dedicated admin account if it does not exist.
-- Requires a 12+ character admin password when creating that account.
+- Asks you to enter and confirm the admin password when creating that account. S.A.L. does not impose its own minimum length; Windows password policy still applies.
 - Ensures the dedicated account is in the local Administrators group.
 - Changes an existing selected student account to Standard User if necessary.
 - Sets `UserMayChangePassword` to `False` for the student account.
@@ -35,7 +35,7 @@ A typical fresh setup can now be done entirely inside S.A.L.:
 1. Enter the desired student username.
 2. If it does not exist, answer `Y` to create it as a passwordless Standard User.
 3. Enter the dedicated admin username, or press Enter for `AdminControl`.
-4. If the admin account does not exist, enter its strong password twice.
+4. If the admin account does not exist, enter its password twice.
 5. Confirm the changes with `Y`.
 6. S.A.L. verifies the final state and prints `DONE` when complete.
 
