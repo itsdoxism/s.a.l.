@@ -3,7 +3,7 @@
 # Console edition for authorized school-owned Windows 11 PCs.
 
 $ErrorActionPreference = 'Stop'
-$RawScriptUrl = 'https://raw.githubusercontent.com/itsdoxism/s.a.l/main/SchoolAccountLockdown.ps1'
+$RawScriptUrl = 'https://raw.githubusercontent.com/itsdoxism/s.a.l./main/SchoolAccountLockdown.ps1'
 
 function Test-IsAdministrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -77,10 +77,10 @@ function Get-DeviceState {
     $adminObject = Get-LocalUserSafe -Name $Admin
 
     [pscustomobject]@{
-        AdminExists          = [bool]$adminObject
-        AdminIsAdministrator = if ($adminObject) { Test-LocalAdministrator -Name $Admin } else { $false }
-        StudentExists        = [bool]$studentObject
-        StudentIsStandard    = if ($studentObject) { -not (Test-LocalAdministrator -Name $Student) } else { $false }
+        AdminExists           = [bool]$adminObject
+        AdminIsAdministrator  = if ($adminObject) { Test-LocalAdministrator -Name $Admin } else { $false }
+        StudentExists         = [bool]$studentObject
+        StudentIsStandard     = if ($studentObject) { -not (Test-LocalAdministrator -Name $Student) } else { $false }
         PasswordChangeBlocked = if ($studentObject) { $studentObject.UserMayChangePassword -eq $false } else { $false }
     }
 }
@@ -127,10 +127,24 @@ Get-LocalUser |
     Format-Table -AutoSize
 
 $Student = Read-Host 'Student username'
-if (-not (Get-LocalUserSafe -Name $Student)) {
-    Write-Host "ERROR: Local user '$Student' was not found." -ForegroundColor Red
+if ([string]::IsNullOrWhiteSpace($Student)) {
+    Write-Host 'ERROR: Student username cannot be empty.' -ForegroundColor Red
     Read-Host 'Press Enter to exit'
     exit 1
+}
+
+$CreateStudent = $false
+if (-not (Get-LocalUserSafe -Name $Student)) {
+    Write-Host "Student account '$Student' does not exist." -ForegroundColor Yellow
+    $createChoice = Read-Host "Create '$Student' as a passwordless Standard User? (Y/N)"
+    if ($createChoice -match '^(y|yes)$') {
+        $CreateStudent = $true
+    }
+    else {
+        Write-Host 'No student account was created. Nothing changed.' -ForegroundColor Yellow
+        Read-Host 'Press Enter to exit'
+        exit
+    }
 }
 
 $Admin = Read-Host 'Dedicated admin username [AdminControl]'
@@ -151,11 +165,15 @@ if (Test-FullyConfigured -State $state) {
     exit
 }
 
+if ($CreateStudent) {
+    Write-Host "[PLAN] Create '$Student' as a passwordless Standard User." -ForegroundColor Cyan
+}
 Write-Host 'This device is not fully configured.' -ForegroundColor Yellow
 $confirm = Read-Host 'Apply/fix configuration? (Y/N)'
 if ($confirm -notmatch '^(y|yes)$') { exit }
 
 try {
+    # Create/verify the dedicated administrator first.
     if (-not $state.AdminExists) {
         Write-Host "`nCreating dedicated administrator '$Admin'..." -ForegroundColor Yellow
 
@@ -189,9 +207,19 @@ try {
         Write-Host "[OK] '$Admin' added to '$AdminGroup'." -ForegroundColor Green
     }
 
-    # Safety check: never demote the student until another Administrator is verified.
+    # Safety check: never create/demote/lock the student until another Administrator is verified.
     if (-not (Test-LocalAdministrator -Name $Admin)) {
         throw 'Dedicated administrator could not be verified. Student account was not changed.'
+    }
+
+    # Create the student account if requested. New local users are Standard Users unless added to Administrators.
+    if ($CreateStudent -and -not (Get-LocalUserSafe -Name $Student)) {
+        New-LocalUser -Name $Student -NoPassword -Description 'School student account' -ErrorAction Stop | Out-Null
+        Write-Host "[OK] Passwordless student account '$Student' created." -ForegroundColor Green
+    }
+
+    if (-not (Get-LocalUserSafe -Name $Student)) {
+        throw "Student account '$Student' could not be found or created."
     }
 
     if (Test-LocalAdministrator -Name $Student) {
