@@ -1,10 +1,10 @@
-# S.A.L. — School Account Lockdown
+# S.A.L.
 
 Small PowerShell console tool for **authorized school-owned Windows 11 PCs**.
 
-S.A.L. now opens to a main menu instead of immediately asking for usernames. It also remembers the managed student/admin pair after a successful setup and performs a quick health scan on later runs.
+S.A.L. opens to a simple menu, remembers the managed **standard account + admin account**, and can check/fix common account problems later.
 
-## Fastest way to run
+## Run
 
 Open PowerShell and run:
 
@@ -12,122 +12,84 @@ Open PowerShell and run:
 irm "https://raw.githubusercontent.com/itsdoxism/s.a.l./main/SchoolAccountLockdown.ps1" | iex
 ```
 
-If PowerShell is not already elevated, S.A.L. requests Administrator permission through UAC and relaunches itself. The elevated relaunch cache-busts the raw GitHub URL so it is less likely to execute an older cached script.
+If PowerShell is not already elevated, Windows asks for administrator permission and S.A.L. relaunches itself.
 
 ## Main menu
 
-After elevation S.A.L. shows a quick scan and this menu:
-
 ```text
-[1] Smart scan + repair managed setup
-[2] Setup / reconfigure student + admin
-[3] Repair student sign-in visibility
-[4] Admin account maintenance
-[5] Extra local-user cleanup
-[6] Full diagnostics
+[1] Check & fix
+[2] Set up accounts
+[3] Fix standard sign-in
+[4] Admin tools
+[5] Remove extra users
+[6] Show full status
 [0] Exit
 ```
 
-So running the command no longer immediately drops you into the full setup prompts.
+## Standard account
 
-## Quick scan and saved state
+The standard account is the normal everyday account on the school PC. S.A.L. can:
 
-After a successful setup S.A.L. stores only the managed **student username** and **admin username** under its local HKLM state key. It does **not** store either password.
+- create it with no password;
+- make sure it is enabled;
+- remove admin access from it;
+- stop it from setting/changing its local password;
+- repair Windows settings that can hide it from the sign-in / Switch user screen.
 
-On later runs S.A.L. can detect problems such as:
+Older S.A.L. installs that used the word `student` are still recognized automatically for compatibility.
 
-- dedicated admin account missing;
-- dedicated admin no longer having Administrator rights;
-- student account missing;
-- student account disabled;
-- student hidden from the sign-in / Switch user screen;
-- student still having Administrator rights;
-- student being allowed to create/change its own local password.
+## Admin account
 
-Older S.A.L.-created machines without saved state can also be auto-detected when there is exactly one account with each S.A.L. account description.
+S.A.L. can create or use a separate admin account. If the requested admin name already exists, it asks before using or changing it.
 
-## Option 1 — Smart repair
+It can also:
 
-Smart repair uses the saved/auto-detected student and admin names, shows every detected issue, asks for confirmation, and repairs the managed setup.
+- give an existing account admin access after confirmation;
+- change/reset the admin password when requested;
+- recreate a missing managed admin from the Check & fix option.
 
-It can:
+S.A.L. does not add its own minimum password length. Windows password policy still applies.
 
-- recreate a missing dedicated admin after asking for a new password;
-- restore Administrator rights to the dedicated admin;
-- recreate a missing student after explicit confirmation;
-- enable/unhide the student at Windows sign-in;
-- remove Administrator rights from the student;
-- block the student from creating/changing its local password.
+## Check & fix
 
-The dedicated admin is verified before S.A.L. changes the student's privileges.
+After setup, S.A.L. remembers the standard/admin account names (not their passwords). Later it can check for problems such as:
 
-## Option 2 — Setup / reconfigure
+- missing admin account;
+- admin access removed from the admin account;
+- missing or disabled standard account;
+- standard account hidden from the Windows user list;
+- standard account accidentally having admin access;
+- standard account being allowed to set/change a password.
 
-Use this for a new laptop or when changing which accounts S.A.L. manages.
+It shows what it found and asks before making repairs.
 
-S.A.L. can:
+## Fix standard sign-in
 
-- create a passwordless Standard student account;
-- enable/unhide the selected student account;
-- create a dedicated admin account;
-- safely handle an admin-name collision by asking whether to use it, choose another name, or cancel;
-- ask before promoting an existing non-admin account;
-- optionally change/reset an existing admin password;
-- demote the student from Administrators;
-- set `UserMayChangePassword` to `False` for the student;
-- save the selected managed student/admin pair for future scans.
+This option is for the case where the account exists in PowerShell but does not appear normally in Windows.
 
-S.A.L. does not impose its own minimum password length; Windows password policy still applies.
+It checks/fixes:
 
-## Option 3 — Student sign-in repair
+- account enabled state;
+- per-account Winlogon hiding;
+- account switching visibility;
+- normal user-tile visibility;
+- local-user listing on domain-joined PCs.
 
-This is a focused repair for the case where PowerShell shows a local student account but Windows does not show it normally on the sign-in / Switch user screen.
+After a repair, fully **sign out or restart Windows** before checking again. `Win + L` can still show a cached user list.
 
-It:
+## Remove extra users
 
-- enables the local account if disabled;
-- forces the account visible in Winlogon `SpecialAccounts\UserList`;
-- on domain-joined PCs, enables local-user enumeration.
+S.A.L. remembers which local accounts existed before the current run and can offer to remove extra ones after confirmation.
 
-Windows can still require one sign-out or restart before a newly created account tile refreshes.
+It protects:
 
-## Option 4 — Admin maintenance
-
-Admin maintenance lets an authorized operator:
-
-- inspect/use the saved managed admin by default;
-- create a missing admin;
-- promote an existing local account after confirmation;
-- optionally change/reset its password.
-
-Password resets show a warning because administrator resets can affect EFS-encrypted files or saved credentials owned by that account.
-
-## Option 5 — Extra local-user cleanup
-
-S.A.L. takes a snapshot of local users when the script starts. Cleanup only considers accounts from that original snapshot and always protects:
-
-- the managed student;
-- the managed admin;
-- Windows built-in accounts;
+- the selected standard account;
+- the selected admin account;
+- Windows built-in/system accounts;
 - accounts created during the current S.A.L. run.
 
-It lists cleanup candidates and asks before deleting them. Cleanup removes the **local account object only**; it does not delete the profile folder/data.
-
-## Option 6 — Full diagnostics
-
-Diagnostics displays local users with important properties and then shows the complete managed-account state plus detected issues.
-
-## Configured state
-
-A device is healthy when:
-
-- the dedicated admin exists and is an Administrator;
-- the selected student exists;
-- the student is enabled;
-- the student is configured to be visible at sign-in;
-- the student is a Standard User;
-- the student cannot create/change its own local-account password.
+The cleanup removes the local account object only. It does not delete the user's profile folder/data in `C:\Users`.
 
 ## Important
 
-Use only on computers you are authorized to administer. Keep the dedicated administrator password secure and test changes on one spare/test laptop before wider deployment.
+Use only on computers you are authorized to administer. Keep the admin password secure and test changes on one spare/test PC before wider deployment.
