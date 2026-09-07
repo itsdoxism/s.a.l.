@@ -38,6 +38,11 @@ function Ensure-Administrator {
 
 Ensure-Administrator
 
+# Snapshot the local accounts that existed BEFORE S.A.L. creates anything.
+# Cleanup later only considers accounts from this snapshot, so accounts created
+# during this run can never be accidentally selected for cleanup.
+$InitialLocalUsers = @(Get-LocalUser | Select-Object Name, SID)
+
 function Get-AdminGroupName {
     try {
         $group = Get-CimInstance Win32_Group -Filter "LocalAccount=True AND SID='S-1-5-32-544'"
@@ -113,6 +118,66 @@ function Show-State {
     Write-Host ''
 }
 
+function Invoke-PreexistingUserCleanup {
+    param(
+        [Parameter(Mandatory=$true)][string]$Student,
+        [Parameter(Mandatory=$true)][string]$Admin
+    )
+
+    # Never offer Windows built-in/system accounts for deletion.
+    $protectedNames = @('Administrator', 'Guest', 'DefaultAccount', 'WDAGUtilityAccount')
+
+    $candidates = @(
+        $InitialLocalUsers |
+            Where-Object {
+                $name = $_.Name
+                $sid = [string]$_.SID
+
+                ($name -ine $Student) -and
+                ($name -ine $Admin) -and
+                ($protectedNames -notcontains $name) -and
+                ($sid -notmatch '-(500|501|503|504)$')
+            } |
+            Where-Object { Get-LocalUserSafe -Name $_.Name }
+    )
+
+    if ($candidates.Count -eq 0) {
+        Write-Host '[OK] No extra pre-existing local users found.' -ForegroundColor Green
+        return
+    }
+
+    Write-Host ''
+    Write-Host 'Extra local users that existed BEFORE this S.A.L. run:' -ForegroundColor Yellow
+    foreach ($candidate in $candidates) {
+        $suffix = ''
+        if ($candidate.Name -ieq [Environment]::UserName) {
+            $suffix = '  [CURRENT SESSION]'
+        }
+        Write-Host "  - $($candidate.Name)$suffix"
+    }
+
+    Write-Host ''
+    Write-Host 'The selected student account, dedicated admin account, Windows built-ins,' -ForegroundColor DarkGray
+    Write-Host 'and any account created during this run are NOT cleanup candidates.' -ForegroundColor DarkGray
+    Write-Host 'Only the local account objects are removed; profile folders/data are not deleted.' -ForegroundColor DarkGray
+
+    $cleanupChoice = Read-Host 'Delete ALL listed pre-existing local users? (Y/N)'
+    if ($cleanupChoice -notmatch '^(y|yes)$') {
+        Write-Host '[SKIP] Extra local users were left unchanged.' -ForegroundColor Yellow
+        return
+    }
+
+    foreach ($candidate in $candidates) {
+        try {
+            Remove-LocalUser -Name $candidate.Name -ErrorAction Stop
+            Write-Host "[OK] Removed local user '$($candidate.Name)'." -ForegroundColor Green
+        }
+        catch {
+            Write-Host "[WARN] Could not remove '$($candidate.Name)': $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+    }
+}
+
 Clear-Host
 Write-Host '==============================================' -ForegroundColor Cyan
 Write-Host '       SCHOOL ACCOUNT LOCKDOWN (S.A.L.)' -ForegroundColor Cyan
@@ -161,6 +226,7 @@ Show-State -State $state
 
 if (Test-FullyConfigured -State $state) {
     Write-Host 'This device is already configured.' -ForegroundColor Green
+    Invoke-PreexistingUserCleanup -Student $Student -Admin $Admin
     Read-Host 'Press Enter to exit'
     exit
 }
@@ -234,6 +300,7 @@ try {
 
     if (Test-FullyConfigured -State $finalState) {
         Write-Host 'DONE - This laptop is configured.' -ForegroundColor Green
+        Invoke-PreexistingUserCleanup -Student $Student -Admin $Admin
     }
     else {
         Write-Host 'WARNING - Some settings are still incomplete.' -ForegroundColor Yellow
