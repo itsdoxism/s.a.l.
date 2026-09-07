@@ -16,6 +16,9 @@ It checks the machine first and only applies missing settings.
 - Changes an existing selected student account to Standard User if necessary.
 - Sets `UserMayChangePassword` to `False` for the student account.
 - Detects when the laptop is already fully configured.
+- Can offer to remove **other local users that existed before S.A.L. started**, but only after asking for permission.
+- Never offers the selected student account, dedicated admin account, Windows built-in accounts, or accounts created during the current run for cleanup.
+- Cleanup removes the local account object only; it does not delete the user's profile folder/data.
 - Does not save the admin password to disk or logs.
 
 ## Fastest way to run
@@ -38,8 +41,23 @@ A typical fresh setup can now be done entirely inside S.A.L.:
 4. If the admin account does not exist, enter its password twice.
 5. Confirm the changes with `Y`.
 6. S.A.L. verifies the final state and prints `DONE` when complete.
+7. If other pre-existing local users are found, S.A.L. lists them and asks whether to remove all listed accounts.
 
 The dedicated administrator is created and verified **before** S.A.L. changes or locks down the student account.
+
+## Extra-user cleanup safety
+
+S.A.L. takes a snapshot of local users before it creates any accounts. Cleanup candidates come only from that original snapshot.
+
+Therefore:
+
+- a newly created student account cannot be selected for cleanup;
+- a newly created dedicated admin account cannot be selected for cleanup;
+- the chosen student/admin accounts are protected even if they already existed;
+- built-in Windows accounts are protected;
+- nothing is removed unless you answer `Y` to the cleanup prompt.
+
+If the current signed-in account is one of the cleanup candidates, S.A.L. marks it as `[CURRENT SESSION]` before asking for confirmation.
 
 ## Local run
 
@@ -66,6 +84,8 @@ When all checks pass, the program shows:
 ```text
 This device is already configured.
 ```
+
+It can still offer cleanup for extra pre-existing local users after this check.
 
 ## Important
 
