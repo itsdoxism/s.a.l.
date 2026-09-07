@@ -9,12 +9,12 @@ It checks the machine first and only applies missing settings.
 - Shows local users.
 - Lets you enter the student local account name.
 - If that student account does not exist, S.A.L. can create it as a **passwordless Standard User**.
+- Ensures the selected student account is **enabled and visible on the Windows sign-in / Switch user screen**.
+- Removes the effect of a stale Winlogon `SpecialAccounts\UserList=0` entry that would hide the selected student.
+- On domain-joined PCs, enables local-user enumeration so the local student account can be shown at sign-in.
 - Lets you choose the dedicated admin account name (default: `AdminControl`).
 - Creates the dedicated admin account if it does not exist.
-- If the chosen admin name already exists, S.A.L. does **not** silently reuse it. It asks whether to:
-  1. use the existing account;
-  2. choose another admin name; or
-  3. cancel.
+- If the chosen admin name already exists, S.A.L. does **not** silently reuse it. It asks whether to use the existing account, choose another name, or cancel.
 - If an existing chosen account is not an Administrator, S.A.L. asks for permission before promoting it.
 - For an existing chosen admin, S.A.L. can optionally change/reset its password after an additional confirmation.
 - S.A.L. does not impose its own password minimum length; Windows password policy still applies.
@@ -49,10 +49,13 @@ A typical fresh setup can be done entirely inside S.A.L.:
 6. If the existing account is not already an Administrator, approve or reject promotion.
 7. Optionally change/reset the existing admin password.
 8. Confirm pending changes with `Y`.
-9. S.A.L. verifies the final state and prints `DONE` when complete.
-10. If other pre-existing local users are found, S.A.L. lists them and asks whether to remove all listed accounts.
+9. S.A.L. enables/unhides the student account, makes it Standard, and blocks student password changes.
+10. S.A.L. verifies the final state and prints `DONE` when complete.
+11. If other pre-existing local users are found, S.A.L. lists them and asks whether to remove all listed accounts.
 
 The dedicated administrator is created or verified **before** S.A.L. changes or locks down the student account.
+
+After creating a new student account, Windows may need one **sign out or restart** before the new account tile appears immediately on the sign-in screen.
 
 ## Existing admin maintenance
 
@@ -107,6 +110,8 @@ A device is considered fully configured when:
 - the dedicated admin account exists;
 - that account is an Administrator;
 - the selected student account exists;
+- the student account is enabled;
+- the student account is configured to be visible at sign-in;
 - the student account is not an Administrator;
 - the student cannot change/create its own local-account password.
 
