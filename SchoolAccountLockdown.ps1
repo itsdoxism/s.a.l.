@@ -177,7 +177,7 @@ try {
     if (-not $state.AdminExists) {
         Write-Host "`nCreating dedicated administrator '$Admin'..." -ForegroundColor Yellow
 
-        $password1 = Read-Host 'New admin password (12+ chars)' -AsSecureString
+        $password1 = Read-Host 'New admin password' -AsSecureString
         $password2 = Read-Host 'Confirm admin password' -AsSecureString
 
         $ptr1 = [IntPtr]::Zero
@@ -188,7 +188,6 @@ try {
             $plain1 = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr1)
             $plain2 = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr2)
 
-            if ($plain1.Length -lt 12) { throw 'Admin password must be at least 12 characters.' }
             if ($plain1 -cne $plain2) { throw 'Passwords do not match.' }
         }
         finally {
