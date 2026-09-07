@@ -4,6 +4,8 @@
 
 $ErrorActionPreference = 'Stop'
 $RawScriptUrl = 'https://raw.githubusercontent.com/itsdoxism/s.a.l./main/SchoolAccountLockdown.ps1'
+$UserListRegistryPath = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList'
+$WindowsSystemPolicyPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System'
 
 function Test-IsAdministrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -72,6 +74,86 @@ function Test-LocalAdministrator {
     return $false
 }
 
+function Test-ComputerPartOfDomain {
+    try {
+        $computer = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop
+        return [bool]$computer.PartOfDomain
+    }
+    catch {
+        return $false
+    }
+}
+
+function Test-StudentVisibleAtLogon {
+    param([Parameter(Mandatory=$true)][string]$Name)
+
+    $studentObject = Get-LocalUserSafe -Name $Name
+    if (-not $studentObject -or -not $studentObject.Enabled) {
+        return $false
+    }
+
+    # A DWORD value of 0 in this Winlogon list hides a local account.
+    try {
+        if (Test-Path $UserListRegistryPath) {
+            $properties = Get-ItemProperty -Path $UserListRegistryPath -ErrorAction Stop
+            $entry = $properties.PSObject.Properties[$Name]
+            if ($null -ne $entry -and [int]$entry.Value -eq 0) {
+                return $false
+            }
+        }
+    }
+    catch {
+        return $false
+    }
+
+    # Domain-joined Windows PCs may suppress enumeration of local accounts.
+    if (Test-ComputerPartOfDomain) {
+        try {
+            if (-not (Test-Path $WindowsSystemPolicyPath)) { return $false }
+            $policy = Get-ItemProperty -Path $WindowsSystemPolicyPath -Name 'EnumerateLocalUsers' -ErrorAction Stop
+            if ([int]$policy.EnumerateLocalUsers -ne 1) { return $false }
+        }
+        catch {
+            return $false
+        }
+    }
+
+    return $true
+}
+
+function Ensure-StudentLoginVisibility {
+    param([Parameter(Mandatory=$true)][string]$Name)
+
+    $studentObject = Get-LocalUserSafe -Name $Name
+    if (-not $studentObject) {
+        throw "Student account '$Name' does not exist."
+    }
+
+    if (-not $studentObject.Enabled) {
+        Enable-LocalUser -Name $Name -ErrorAction Stop
+        Write-Host "[OK] Student account '$Name' enabled." -ForegroundColor Green
+    }
+
+    # Explicitly mark the selected student account as visible instead of allowing
+    # a stale SpecialAccounts\UserList=0 entry to hide it from the sign-in screen.
+    if (-not (Test-Path $UserListRegistryPath)) {
+        New-Item -Path $UserListRegistryPath -Force -ErrorAction Stop | Out-Null
+    }
+    New-ItemProperty -Path $UserListRegistryPath -Name $Name -PropertyType DWord -Value 1 -Force -ErrorAction Stop | Out-Null
+
+    # On domain-joined PCs Windows can hide local accounts from user enumeration.
+    # Enable local-user enumeration so the student tile can be shown at sign-in.
+    if (Test-ComputerPartOfDomain) {
+        if (-not (Test-Path $WindowsSystemPolicyPath)) {
+            New-Item -Path $WindowsSystemPolicyPath -Force -ErrorAction Stop | Out-Null
+        }
+        New-ItemProperty -Path $WindowsSystemPolicyPath -Name 'EnumerateLocalUsers' -PropertyType DWord -Value 1 -Force -ErrorAction Stop | Out-Null
+        Write-Host '[OK] Local-user enumeration enabled for this domain-joined PC.' -ForegroundColor Green
+    }
+
+    Write-Host "[OK] '$Name' is configured to appear on the Windows sign-in screen." -ForegroundColor Green
+}
+
 function Read-ConfirmedPassword {
     param([Parameter(Mandatory=$true)][string]$Label)
 
@@ -111,11 +193,13 @@ function Get-DeviceState {
     $adminObject = Get-LocalUserSafe -Name $Admin
 
     [pscustomobject]@{
-        AdminExists           = [bool]$adminObject
-        AdminIsAdministrator  = if ($adminObject) { Test-LocalAdministrator -Name $Admin } else { $false }
-        StudentExists         = [bool]$studentObject
-        StudentIsStandard     = if ($studentObject) { -not (Test-LocalAdministrator -Name $Student) } else { $false }
-        PasswordChangeBlocked = if ($studentObject) { $studentObject.UserMayChangePassword -eq $false } else { $false }
+        AdminExists            = [bool]$adminObject
+        AdminIsAdministrator   = if ($adminObject) { Test-LocalAdministrator -Name $Admin } else { $false }
+        StudentExists          = [bool]$studentObject
+        StudentIsEnabled       = if ($studentObject) { [bool]$studentObject.Enabled } else { $false }
+        StudentVisibleAtLogon  = if ($studentObject) { Test-StudentVisibleAtLogon -Name $Student } else { $false }
+        StudentIsStandard      = if ($studentObject) { -not (Test-LocalAdministrator -Name $Student) } else { $false }
+        PasswordChangeBlocked  = if ($studentObject) { $studentObject.UserMayChangePassword -eq $false } else { $false }
     }
 }
 
@@ -125,6 +209,8 @@ function Test-FullyConfigured {
         $State.AdminExists -and
         $State.AdminIsAdministrator -and
         $State.StudentExists -and
+        $State.StudentIsEnabled -and
+        $State.StudentVisibleAtLogon -and
         $State.StudentIsStandard -and
         $State.PasswordChangeBlocked
     )
@@ -142,6 +228,8 @@ function Show-State {
     Write-Host "$(Mark $State.AdminExists) Dedicated admin account exists"
     Write-Host "$(Mark $State.AdminIsAdministrator) Dedicated admin has Administrator rights"
     Write-Host "$(Mark $State.StudentExists) Student account exists"
+    Write-Host "$(Mark $State.StudentIsEnabled) Student account is enabled"
+    Write-Host "$(Mark $State.StudentVisibleAtLogon) Student account is visible at sign-in"
     Write-Host "$(Mark $State.StudentIsStandard) Student account is Standard User"
     Write-Host "$(Mark $State.PasswordChangeBlocked) Student password creation/change is blocked"
     Write-Host ''
@@ -338,6 +426,9 @@ if ($PromoteExistingAdmin) {
 if ($ChangeExistingAdminPassword) {
     Write-Host "[PLAN] Change/reset password for existing admin '$Admin'." -ForegroundColor Cyan
 }
+if ($state.StudentExists -and (-not $state.StudentIsEnabled -or -not $state.StudentVisibleAtLogon)) {
+    Write-Host "[PLAN] Enable/unhide student account '$Student' for Windows sign-in." -ForegroundColor Cyan
+}
 
 Write-Host 'This device has pending configuration/maintenance changes.' -ForegroundColor Yellow
 $confirm = Read-Host 'Apply/fix configuration? (Y/N)'
@@ -383,6 +474,10 @@ try {
         throw "Student account '$Student' could not be found or created."
     }
 
+    # Ensure a newly created or previously hidden/disabled student account is usable
+    # from the normal Windows sign-in / Switch user screen.
+    Ensure-StudentLoginVisibility -Name $Student
+
     if (Test-LocalAdministrator -Name $Student) {
         Remove-LocalGroupMember -Group $AdminGroup -Member $Student -ErrorAction Stop
         Write-Host "[OK] '$Student' changed to Standard User." -ForegroundColor Green
@@ -396,6 +491,7 @@ try {
 
     if (Test-FullyConfigured -State $finalState) {
         Write-Host 'DONE - This laptop is configured.' -ForegroundColor Green
+        Write-Host 'Sign out or restart Windows once if the new student tile is not visible immediately.' -ForegroundColor Cyan
         Invoke-PreexistingUserCleanup -Student $Student -Admin $Admin
     }
     else {
