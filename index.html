@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>S.A.L. — School Account Lockdown</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f5f5f5;
+      color: #111;
+    }
+    main {
+      width: min(720px, 100%);
+      background: #fff;
+      border: 1px solid #ddd;
+      border-radius: 16px;
+      padding: 28px;
+      box-shadow: 0 10px 30px rgba(0,0,0,.06);
+    }
+    h1 { margin: 0 0 8px; font-size: 28px; }
+    p { margin: 0 0 22px; color: #555; line-height: 1.5; }
+    .label { font-size: 13px; font-weight: 700; margin-bottom: 8px; }
+    .command {
+      display: flex;
+      gap: 10px;
+      align-items: stretch;
+    }
+    code {
+      flex: 1;
+      overflow-x: auto;
+      white-space: nowrap;
+      padding: 14px 16px;
+      border-radius: 10px;
+      background: #111;
+      color: #fff;
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      font-size: 14px;
+    }
+    button {
+      border: 0;
+      border-radius: 10px;
+      padding: 0 18px;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+      background: #111;
+      color: #fff;
+    }
+    button:active { transform: translateY(1px); }
+    .steps { margin-top: 22px; font-size: 14px; color: #444; line-height: 1.7; }
+    .note { margin-top: 20px; font-size: 12px; color: #777; }
+    @media (max-width: 620px) {
+      .command { flex-direction: column; }
+      button { padding: 12px 18px; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>S.A.L.</h1>
+    <p>School Account Lockdown — quick launcher for authorized school-owned Windows 11 PCs.</p>
+
+    <div class="label">PowerShell command</div>
+    <div class="command">
+      <code id="cmd">irm "https://raw.githubusercontent.com/itsdoxism/s.a.l./main/SchoolAccountLockdown.ps1" | iex</code>
+      <button id="copy" type="button">Copy</button>
+    </div>
+
+    <div class="steps">
+      1. Open PowerShell.<br>
+      2. Paste the command.<br>
+      3. Press Enter and approve UAC.<br>
+      4. Follow the S.A.L. prompts.
+    </div>
+
+    <div class="note">Use only on computers you are authorized to administer.</div>
+  </main>
+
+  <script>
+    const button = document.getElementById('copy');
+    const command = document.getElementById('cmd').textContent;
+
+    button.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(command);
+        button.textContent = 'Copied!';
+        setTimeout(() => button.textContent = 'Copy', 1400);
+      } catch {
+        const range = document.createRange();
+        range.selectNodeContents(document.getElementById('cmd'));
+        const selection = window.getSelection();
+        selection.removeAllRanges();
+        selection.addRange(range);
+      }
+    });
+  </script>
+</body>
+</html>
